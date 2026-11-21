@@ -75,10 +75,14 @@ export class AiCallController {
   @HttpCode(200)
   @ApiOperation({ summary: 'Twilio voice webhook - handles incoming speech or keypad DTMF from patient' })
   async handleVoiceWebhook(
-    @Query('callId') callId: string,
+    @Query('callId') rawCallId: string,
+    @Query('defaultLang') defaultLang: string,
     @Body() body: TwilioVoiceDto,
     @Res() res: Response,
   ) {
+    // Defensive sanitization: extract clean UUID in case query strings were chained or malformed
+    const callId = rawCallId ? rawCallId.split('?')[0].split('&')[0].trim() : '';
+
     if (body?.SpeechResult) {
       this.logger.log(`\n==================================================\n🎤 [CALLER SPOKE]\n🗣️ Text: "${body.SpeechResult}"\n📊 Confidence: ${body.Confidence || 'N/A'}\n🆔 CallId: ${callId}\n==================================================`);
     } else if (body?.Digits) {
@@ -100,6 +104,8 @@ export class AiCallController {
         body.SpeechResult,
         body.CallSid || '',
         body.Digits,
+        body.Confidence,
+        defaultLang,
       );
       res.setHeader('Content-Type', 'text/xml');
       return res.send(twiml);

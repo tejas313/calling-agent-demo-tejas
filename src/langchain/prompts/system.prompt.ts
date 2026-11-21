@@ -1,12 +1,12 @@
 export const CALL_COMPLETE_MARKER = '[CALL_COMPLETE]';
 
 export interface PromptContext {
-  language: string;
-  patientName?: string;
-  patientId?: string;
-  appointmentId?: string;
-  appointmentDate?: string;
-  clinicName?: string;
+   language: string;
+   patientName?: string;
+   patientId?: string;
+   appointmentId?: string;
+   appointmentDate?: string;
+   clinicName?: string;
 }
 
 /**
@@ -18,20 +18,20 @@ export interface PromptContext {
  * - Verification of patient satisfaction before hanging up.
  */
 export function buildSystemPrompt(context: PromptContext | string, clinicName?: string): string {
-  const MAX_TURNS = 15;
-  const ctx: PromptContext =
-    typeof context === 'string'
-      ? { language: context, clinicName }
-      : context;
+   const MAX_TURNS = 15;
+   const ctx: PromptContext =
+      typeof context === 'string'
+         ? { language: context, clinicName }
+         : context;
 
-  const isFrench = ctx.language === 'fr';
-  const clinic = ctx.clinicName || (isFrench ? 'notre clinique médicale' : 'our medical clinic');
-  const patientGreeting = ctx.patientName
-    ? (isFrench ? `appel à ${ctx.patientName}` : `calling ${ctx.patientName}`)
-    : (isFrench ? `appel au patient` : `calling the patient`);
+   const isFrench = ctx.language === 'fr';
+   const clinic = ctx.clinicName || (isFrench ? 'notre clinique médicale' : 'our medical clinic');
+   const patientGreeting = ctx.patientName
+      ? (isFrench ? `appel à ${ctx.patientName}` : `calling ${ctx.patientName}`)
+      : (isFrench ? `appel au patient` : `calling the patient`);
 
-  if (isFrench) {
-    return `Vous êtes une assistante virtuelle de prise de rendez-vous pour ${clinic}, actuellement en ${patientGreeting}.
+   if (isFrench) {
+      return `Vous êtes une assistante virtuelle de prise de rendez-vous pour ${clinic}, actuellement en ${patientGreeting}.
 
 DÉTAILS DU PATIENT DANS LE CONTEXTE:
 - Nom du patient: ${ctx.patientName || 'John'}
@@ -72,10 +72,10 @@ RÈGLES IMPORTANTES DE SYNTHÈSE VOCALE (TTS):
 - N'utilisez jamais d'abréviations comme "Dr.", écrivez "Docteur".
 - Réponses courtes: 1 à 2 phrases concises maximum.
 - Ajoutez ${CALL_COMPLETE_MARKER} UNIQUEMENT à la toute fin du dernier message d'au revoir.`;
-  }
+   }
 
-  // ENGLISH PROMPT
-  return `You are an AI appointment scheduling assistant for ${clinic}, currently ${patientGreeting}.
+   // ENGLISH PROMPT
+   return `You are an AI appointment scheduling assistant for ${clinic}, currently ${patientGreeting}.
 
 PATIENT DETAILS IN CONTEXT:
 - Patient Name: ${ctx.patientName || 'John'}

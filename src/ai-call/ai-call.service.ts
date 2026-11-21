@@ -146,9 +146,11 @@ export class AiCallService {
     speechResult: string | undefined,
     callSid: string,
     digits?: string,
+    confidence?: string | number,
+    defaultLang?: string,
   ): Promise<string> {
     this.logger.log(
-      `[handleVoiceWebhook] ▶ callId=${callId}, callSid=${callSid}, speechResult="${speechResult}", digits="${digits}"`,
+      `[handleVoiceWebhook] ▶ callId=${callId}, callSid=${callSid}, speechResult="${speechResult}", digits="${digits}", confidence="${confidence}", defaultLang="${defaultLang}"`,
     );
 
     const aiCall = await this.aiCallRepository.findOne({
@@ -181,6 +183,61 @@ export class AiCallService {
       return this.twilioService.generateLanguageSelectionTwiML(actionUrl);
     }
 
+    // Process inputs
+    const digitsInput = (digits || "").trim();
+    const speechLower = (speechResult || "").toLowerCase().trim();
+    const parsedConfidence =
+      confidence !== undefined && confidence !== null
+        ? parseFloat(confidence.toString())
+        : 1.0;
+
+    // Phantom acoustic noise filter:
+    // Confidence threshold raised to 0.3 to discard speakerphone echo, line static,
+    // and background sounds more reliably without discarding real caller speech.
+    const isPhantomNoise =
+      !digitsInput &&
+      speechResult &&
+      !isNaN(parsedConfidence) &&
+      parsedConfidence < 0.3;
+
+    if (isPhantomNoise) {
+      this.logger.warn(
+        `[handleVoiceWebhook] ⚠️ Phantom acoustic noise discarded (confidence=${confidence}, text="${speechResult}").`,
+      );
+      if (aiCall.currentTurn <= 1) {
+        // Still on Turn 1 language selection: replay language prompt
+        return this.twilioService.generateLanguageSelectionTwiML(actionUrl);
+      }
+      // Conversational turn: replay the last AI response so the caller hears the
+      // full message again, as if the echo never interrupted it.
+      // Never say "Sorry I didn't catch that" — the caller never actually spoke.
+      const lastAiMessage = [...aiCall.transcript]
+        .reverse()
+        .find((msg) => msg.role === "assistant");
+      if (lastAiMessage?.content) {
+        this.logger.log(
+          `[handleVoiceWebhook] 🔁 Replaying last AI response after phantom noise: "${lastAiMessage.content.substring(0, 80)}..."`,
+        );
+        return this.twilioService.generateGatherTwiML(
+          lastAiMessage.content,
+          actionUrl,
+          aiCall.language,
+        );
+      }
+      // No previous AI message in transcript yet — re-gather silently with a brief pause
+      this.logger.log(
+        `[handleVoiceWebhook] 🔁 No prior AI message to replay — re-gathering silently.`,
+      );
+      const silentRegather = aiCall.language === "fr"
+        ? "Désolée, pouvez-vous répéter?"
+        : "Sorry, could you repeat that please?";
+      return this.twilioService.generateGatherTwiML(
+        silentRegather,
+        actionUrl,
+        aiCall.language,
+      );
+    }
+
     aiCall.currentTurn += 1;
     this.logger.log(
       `[handleVoiceWebhook] Turn #${aiCall.currentTurn} of max ${MAX_CALL_TURNS}`,
@@ -190,20 +247,30 @@ export class AiCallService {
       this.logger.warn(
         `[handleVoiceWebhook] Max turns reached for callId=${callId}`,
       );
-      const maxTurnMsg = aiCall.language === "fr"
-        ? "Je suis désolée, nous avons atteint la durée maximale d'appel. Veuillez contacter directement la clinique. Au revoir."
-        : "I'm sorry, but we have reached the maximum conversation length. Please call the clinic directly. Goodbye.";
+      const maxTurnMsg =
+        aiCall.language === "fr"
+          ? "Je suis désolée, nous avons atteint la durée maximale d'appel. Veuillez contacter directement la clinique. Au revoir."
+          : "I'm sorry, but we have reached the maximum conversation length. Please call the clinic directly. Goodbye.";
       return this.twilioService.generateTwiML(maxTurnMsg, aiCall.language);
     }
 
     // Process language selection if on Turn 2 (or if user requested a language switch)
-    const digitsInput = (digits || "").trim();
-    const speechLower = (speechResult || "").toLowerCase().trim();
-
     let detectedLanguage = aiCall.language || "en";
     let userIntent = "";
 
-    if (
+    // Common greeting words that callers say when first answering — not a language selection
+    const isGreetingWord = [
+      "hello", "hi", "hey", "yes", "yeah", "yep", "sure", "okay", "ok",
+      "bonjour", "allô", "allo", "oui",
+    ].includes(speechLower.replace(/[?.!,]/g, "").trim());
+
+    if (defaultLang === "en") {
+      // Fallback: caller was silent for 6s — default to English
+      detectedLanguage = "en";
+      this.logger.log(
+        `[handleVoiceWebhook] 🇬🇧 Fallback default language activated: English (via timeout redirect)`,
+      );
+    } else if (
       digitsInput === "1" ||
       speechLower === "english" ||
       speechLower.includes("english") ||
@@ -211,7 +278,9 @@ export class AiCallService {
       speechLower === "one"
     ) {
       detectedLanguage = "en";
-      this.logger.log(`[handleVoiceWebhook] 🇬🇧 Language selected: English (via ${digitsInput ? "DTMF 1" : "Speech"})`);
+      this.logger.log(
+        `[handleVoiceWebhook] 🇬🇧 Language selected: English (via ${digitsInput ? "DTMF 1" : "Speech"})`,
+      );
     } else if (
       digitsInput === "2" ||
       speechLower === "french" ||
@@ -222,13 +291,53 @@ export class AiCallService {
       speechLower === "two"
     ) {
       detectedLanguage = "fr";
-      this.logger.log(`[handleVoiceWebhook] 🇫🇷 Language selected: French (via ${digitsInput ? "DTMF 2" : "Speech"})`);
+      this.logger.log(
+        `[handleVoiceWebhook] 🇫🇷 Language selected: French (via ${digitsInput ? "DTMF 2" : "Speech"})`,
+      );
+    } else if (aiCall.currentTurn === 2 && isGreetingWord) {
+      // Turn 2: Caller said "Hello" or "Yes" etc. — treat as English confirmation.
+      // Do NOT send greeting words to the LLM; deliver the appointment greeting directly.
+      detectedLanguage = "en";
+      this.logger.log(
+        `[handleVoiceWebhook] 🇬🇧 Greeting word "${speechResult}" on Turn 2 — defaulting to English, delivering greeting.`,
+      );
     } else if (this.isLikelyFrench(speechLower)) {
       detectedLanguage = "fr";
       userIntent = speechResult || "";
-      this.logger.log(`[handleVoiceWebhook] 🇫🇷 Inferred French from utterance: "${speechResult}"`);
+      this.logger.log(
+        `[handleVoiceWebhook] 🇫🇷 Inferred French from utterance: "${speechResult}"`,
+      );
     } else if (speechResult) {
       userIntent = speechResult;
+    }
+
+    // Conversational turn DTMF keypad fallback (100% fail-safe for noisy environments)
+    if (aiCall.currentTurn > 2 && digitsInput) {
+      if (digitsInput === "1") {
+        userIntent =
+          aiCall.language === "fr"
+            ? "Je confirme mon rendez-vous."
+            : "I would like to confirm my appointment.";
+        this.logger.log(
+          `[handleVoiceWebhook] 🔘 DTMF 1 pressed -> Mapped to Confirm Appointment`,
+        );
+      } else if (digitsInput === "2") {
+        userIntent =
+          aiCall.language === "fr"
+            ? "Je souhaite reporter mon rendez-vous."
+            : "I would like to reschedule my appointment.";
+        this.logger.log(
+          `[handleVoiceWebhook] 🔘 DTMF 2 pressed -> Mapped to Reschedule Appointment`,
+        );
+      } else if (digitsInput === "3") {
+        userIntent =
+          aiCall.language === "fr"
+            ? "Je souhaite annuler mon rendez-vous."
+            : "I would like to cancel my appointment.";
+        this.logger.log(
+          `[handleVoiceWebhook] 🔘 DTMF 3 pressed -> Mapped to Cancel Appointment`,
+        );
+      }
     }
 
     aiCall.language = detectedLanguage;
@@ -237,7 +346,7 @@ export class AiCallService {
     if (userIntent) {
       userMessage = userIntent;
     } else if (aiCall.currentTurn === 2) {
-      // Just chose language, proceed to appointment greeting
+      // Language just chosen (or defaulted) — trigger the appointment greeting, not LLM
       userMessage = "LANGUAGE_SELECTED";
     } else if (speechResult) {
       userMessage = speechResult;
@@ -247,10 +356,10 @@ export class AiCallService {
 
     this.logger.log(`[handleVoiceWebhook] userMessage="${userMessage}", language=${aiCall.language}`);
 
-    if (speechResult) {
+    if (speechResult || userIntent) {
       aiCall.transcript.push({
         role: "user",
-        content: speechResult,
+        content: speechResult || userIntent,
         timestamp: new Date().toISOString(),
       });
     }

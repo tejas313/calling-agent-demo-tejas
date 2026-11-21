@@ -189,6 +189,13 @@ export class AgentService {
         responseText = responseText.replace(CALL_COMPLETE_MARKER, '').trim();
       }
 
+      // Enforce maximum 2 sentences to prevent long TTS responses that cause
+      // speakerphone echo to bleed back into the microphone and trigger barge-in mid-sentence.
+      if (!isComplete) {
+        responseText = this.truncateToMaxSentences(responseText, 2);
+        this.logger.log(`[runAgentTurn] ✂️ Truncated to 2 sentences: "${responseText}"`);
+      }
+
       const updatedHistory = [
         ...params.conversationHistory,
         new HumanMessage(params.userMessage),
@@ -208,5 +215,39 @@ export class AgentService {
       this.logger.error(`[runAgentTurn] Stack:\n${(error as any)?.stack}`);
       throw error;
     }
+  }
+
+  /**
+   * Enforces a maximum number of sentences in an AI response before it is
+   * sent to TTS. This prevents long multi-sentence replies from playing so
+   * long that the caller's phone speaker output bleeds back into the mic
+   * and triggers Twilio barge-in mid-sentence.
+   *
+   * Example: "Hello Mr Smith. I'm Alice from the clinic. Would you like to confirm?" → 2 sentences
+   *
+   * @param text   The full LLM response text.
+   * @param maxSentences  Maximum number of sentences to keep (default: 2).
+   * @returns The text truncated to the first `maxSentences` complete sentences.
+   */
+  private truncateToMaxSentences(text: string, maxSentences: number = 2): string {
+    if (!text) return text;
+
+    // Split on sentence-ending punctuation followed by a space or end-of-string.
+    // Keep the delimiter so each sentence stays punctuated.
+    const sentenceRegex = /[^.!?]*[.!?]+(?:\s|$)/g;
+    const sentences: string[] = [];
+    let match: RegExpExecArray | null;
+
+    while ((match = sentenceRegex.exec(text)) !== null) {
+      sentences.push(match[0]);
+      if (sentences.length >= maxSentences) break;
+    }
+
+    if (sentences.length === 0) {
+      // No sentence-ending punctuation found — return as-is (single fragment)
+      return text;
+    }
+
+    return sentences.join('').trim();
   }
 }
