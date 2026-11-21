@@ -64,7 +64,7 @@ export class AiCallController {
       return res.send(twiml);
     } catch (error: any) {
       this.logger.error(`[POLL] ❌ Error: ${error?.message}`);
-      const fallback = '<Response><Say voice="alice">We are experiencing technical difficulties. Goodbye.</Say><Hangup/></Response>';
+      const fallback = '<Response><Say voice="Polly.Danielle-Neural" language="en-US">We are experiencing technical difficulties. Goodbye.</Say><Hangup/></Response>';
       res.setHeader('Content-Type', 'text/xml');
       return res.send(fallback);
     }
@@ -73,7 +73,7 @@ export class AiCallController {
   @SkipThrottle()
   @Post('twilio/voice')
   @HttpCode(200)
-  @ApiOperation({ summary: 'Twilio voice webhook - handles incoming speech from patient' })
+  @ApiOperation({ summary: 'Twilio voice webhook - handles incoming speech or keypad DTMF from patient' })
   async handleVoiceWebhook(
     @Query('callId') callId: string,
     @Body() body: TwilioVoiceDto,
@@ -81,6 +81,8 @@ export class AiCallController {
   ) {
     if (body?.SpeechResult) {
       this.logger.log(`\n==================================================\n🎤 [CALLER SPOKE]\n🗣️ Text: "${body.SpeechResult}"\n📊 Confidence: ${body.Confidence || 'N/A'}\n🆔 CallId: ${callId}\n==================================================`);
+    } else if (body?.Digits) {
+      this.logger.log(`\n==================================================\n🔢 [CALLER PRESSED KEYPAD]\n🔘 Digits: "${body.Digits}"\n🆔 CallId: ${callId}\n==================================================`);
     } else {
       this.logger.log(`[WEBHOOK] Call connected / Turn initiated — CallSid=${body?.CallSid}, CallId=${callId}`);
     }
@@ -97,13 +99,14 @@ export class AiCallController {
         callId,
         body.SpeechResult,
         body.CallSid || '',
+        body.Digits,
       );
       res.setHeader('Content-Type', 'text/xml');
       return res.send(twiml);
     } catch (error: any) {
       this.logger.error(`[WEBHOOK] ❌ FATAL ERROR in handleVoiceWebhook for callId=${callId}: ${error?.message}`, error?.stack);
       const fallbackTwiml =
-        '<Response><Say voice="alice">We are experiencing technical difficulties. Please call the clinic directly. Goodbye.</Say><Hangup/></Response>';
+        '<Response><Say voice="Polly.Danielle-Neural" language="en-US">We are experiencing technical difficulties. Please call the clinic directly. Goodbye.</Say><Hangup/></Response>';
       res.setHeader('Content-Type', 'text/xml');
       return res.send(fallbackTwiml);
     }

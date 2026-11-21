@@ -1,27 +1,17 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
-// LANGGRAPH CODE COMMENTED OUT TEMPORARILY:
-// import { createReactAgent } from '@langchain/langgraph/prebuilt';
 import {
   HumanMessage,
   AIMessage,
   SystemMessage,
   BaseMessage,
-  ToolMessage,
 } from '@langchain/core/messages';
+import dayjs from 'dayjs';
+import 'dayjs/locale/fr';
 import { PatientsService } from '../../patients/patients.service';
 import { AppointmentsService } from '../../appointments/appointments.service';
 import { LangsmithService } from '../../langsmith/langsmith.service';
-import {
-  createVerifyPatientTool,
-  createGetAppointmentTool,
-  createConfirmAppointmentTool,
-  createCancelAppointmentTool,
-  createGetAvailableSlotsTool,
-  createRescheduleAppointmentTool,
-  createMarkCallLaterTool,
-} from '../tools';
 import { buildSystemPrompt, CALL_COMPLETE_MARKER } from '../prompts/system.prompt';
 
 export interface AgentRunParams {
@@ -57,7 +47,6 @@ export class AgentService {
 
   private createModel() {
     const configuredModel = this.configService.get<string>('GEMINI_MODEL');
-    // Force the working model: override broken/overloaded models (gemini-3.8-flash, gemini-2.0-flash, etc.)
     const activeModel =
       configuredModel &&
       !configuredModel.includes('3.8') &&
@@ -77,23 +66,11 @@ export class AgentService {
   }
 
   private createTools() {
-    /* DATABASE TOOLS COMMENTED OUT (PURE CONVERSATIONAL MODE):
-    return [
-      createVerifyPatientTool(this.patientsService),
-      createGetAppointmentTool(this.appointmentsService),
-      createConfirmAppointmentTool(this.appointmentsService),
-      createCancelAppointmentTool(this.appointmentsService),
-      createGetAvailableSlotsTool(this.appointmentsService),
-      createRescheduleAppointmentTool(this.appointmentsService),
-      createMarkCallLaterTool(this.appointmentsService),
-    ];
-    */
     return [];
   }
 
   public async runAgentTurn(params: AgentRunParams): Promise<AgentRunResult> {
     try {
-      const tools = this.createTools();
       const model = this.createModel();
       const modelName = (model as any)?.model || 'gemini-3.5-flash-lite';
       this.logger.log(`[runAgentTurn] ▶ callId=${params.callId}, turn userMessage="${params.userMessage}", model=${modelName}`);
@@ -102,6 +79,8 @@ export class AgentService {
       // DATABASE LOOKUP (Active: retrieves patient & appointment context from DB in ~1ms)
       let patientName = '';
       let appointmentDate = '';
+      const isFrench = params.language === 'fr';
+
       try {
         if (params.patientId) {
           const patient = await this.patientsService.findById(params.patientId);
@@ -109,9 +88,19 @@ export class AgentService {
         }
         if (params.appointmentId) {
           const appt = await this.appointmentsService.findById(params.appointmentId);
-          const dateStr = (appt as any)?.date ? `${(appt as any).date}` : '';
-          const timeStr = (appt as any)?.time ? ` at ${(appt as any).time}` : '';
-          appointmentDate = `${dateStr}${timeStr}`.trim();
+          if (appt) {
+            const rawDate = (appt as any).date;
+            const rawTime = (appt as any).time;
+            if (isFrench) {
+              const formattedDate = rawDate ? dayjs(rawDate).locale('fr').format('dddd D MMMM') : '';
+              const formattedTime = rawTime ? ` à ${rawTime.replace(':', ' heures ')}` : '';
+              appointmentDate = `${formattedDate}${formattedTime}`.trim();
+            } else {
+              const formattedDate = rawDate ? dayjs(rawDate).format('dddd, MMMM D') : '';
+              const formattedTime = rawTime ? ` at ${rawTime}` : '';
+              appointmentDate = `${formattedDate}${formattedTime}`.trim();
+            }
+          }
         }
       } catch (err: any) {
         this.logger.warn(`[runAgentTurn] Context lookup notice: ${err?.message}`);
@@ -127,14 +116,22 @@ export class AgentService {
         appointmentDate,
       });
 
-      // Turn 1: Deliver immediate greeting without delay
-      if (params.userMessage === 'START_CONVERSATION') {
-        const apptMention = appointmentDate ? ` on ${appointmentDate}` : '';
-        const greeting = patientName
-          ? `Hello ${patientName}, I'm Alice from our medical clinic calling regarding your appointment${apptMention}. How can I help you today?`
-          : `Hello, I'm Alice from our medical clinic calling regarding your appointment${apptMention}. How can I help you today?`;
+      // Turn 2: Deliver appointment details greeting in chosen language (fast <5ms response)
+      if (params.userMessage === 'START_CONVERSATION' || params.userMessage === 'LANGUAGE_SELECTED') {
+        let greeting = '';
+        if (isFrench) {
+          const apptMention = appointmentDate ? ` prévu le ${appointmentDate}` : '';
+          greeting = patientName
+            ? `Merci. Bonjour ${patientName}, je suis Alice de notre clinique médicale, je vous appelle concernant votre rendez-vous${apptMention}. Comment puis-je vous aider aujourd'hui?`
+            : `Merci. Bonjour, je suis Alice de notre clinique médicale, je vous appelle concernant votre rendez-vous${apptMention}. Comment puis-je vous aider aujourd'hui?`;
+        } else {
+          const apptMention = appointmentDate ? ` on ${appointmentDate}` : '';
+          greeting = patientName
+            ? `Thank you. Hello ${patientName}, I'm Alice from our medical clinic calling regarding your appointment${apptMention}. How can I help you today?`
+            : `Thank you. Hello, I'm Alice from our medical clinic calling regarding your appointment${apptMention}. How can I help you today?`;
+        }
 
-        this.logger.log(`[runAgentTurn] ⚡ Turn 1 immediate greeting: "${greeting}"`);
+        this.logger.log(`[runAgentTurn] ⚡ Fast immediate greeting in ${params.language}: "${greeting}"`);
         return {
           response: greeting,
           isComplete: false,
@@ -154,7 +151,6 @@ export class AgentService {
 
       this.logger.log(`[runAgentTurn] Total messages sent to LLM: ${messages.length} (history=${params.conversationHistory.length})`);
 
-      // DIRECT CONVERSATIONAL INVOCATION (DB tools & React Agent commented out below)
       this.logger.log(`[runAgentTurn] 🤖 Invoking LLM directly for conversation...`);
       let responseText = '';
       try {
@@ -176,82 +172,15 @@ export class AgentService {
         }
       } catch (err: any) {
         this.logger.error(`[runAgentTurn] Error invoking LLM directly: ${err?.message}`);
-        responseText = "I'm having a brief connection issue. Could you please repeat that?";
+        responseText = isFrench
+          ? "J'ai un léger problème de connexion. Pourriez-vous répéter s'il vous plaît?"
+          : "I'm having a brief connection issue. Could you please repeat that?";
       }
-
-      /* DATABASE TOOLS & REACT AGENT COMMENTED OUT:
-      const agent = createReactAgent({
-        llm: model,
-        tools,
-      });
-
-      let langsmithMetadata = { callId: params.callId };
-      let langsmithTags = ['ai-call'];
-
-      if (this.langsmithService && typeof this.langsmithService.getMetadata === 'function') {
-        langsmithMetadata = this.langsmithService.getMetadata(params) || langsmithMetadata;
-      }
-      if (this.langsmithService && typeof this.langsmithService.getTags === 'function') {
-        langsmithTags = this.langsmithService.getTags(params) || langsmithTags;
-      }
-
-      const config = {
-        configurable: { thread_id: params.callId },
-        metadata: langsmithMetadata,
-        tags: langsmithTags,
-        runName: `ai-call-${params.callId}-turn`,
-      };
-
-      this.logger.log(`[runAgentTurn] 🤖 Invoking LangGraph agent...`);
-      let result: any;
-      try {
-        const invokeWithTimeout = (cfg: any) =>
-          Promise.race([
-            agent.invoke({ messages }, cfg),
-            new Promise((_, reject) =>
-              setTimeout(() => reject(new Error('AGENT_TIMEOUT: Agent took longer than 12 seconds')), 12000),
-            ),
-          ]);
-
-        try {
-          result = await invokeWithTimeout(config);
-        } catch (invokeError: any) {
-          if (
-            invokeError?.message?.includes('401') ||
-            invokeError?.message?.includes('Unauthorized') ||
-            invokeError?.message?.includes('multipart')
-          ) {
-            this.logger.warn(`[runAgentTurn] ⚠️ LangSmith trace failed (${invokeError?.message?.substring(0, 80)}). Retrying WITHOUT tracing...`);
-            result = await invokeWithTimeout({});
-          } else {
-            throw invokeError;
-          }
-        }
-      } catch (error: any) {
-        this.logger.error(`[runAgentTurn] Error invoking agent: ${error?.message}`);
-        return {
-          response: "I'm having a brief connection issue. Could you please repeat that?",
-          isComplete: false,
-          updatedHistory: [
-            ...params.conversationHistory,
-            new HumanMessage(params.userMessage),
-            new AIMessage("I'm having a brief connection issue. Could you please repeat that?"),
-          ],
-          toolsUsed: [],
-        };
-      }
-      this.logger.log(`[runAgentTurn] ✅ Agent returned ${result.messages.length} messages`);
-
-      const lastMessage = result.messages[result.messages.length - 1] as AIMessage;
-      let responseText = lastMessage.content as string;
-      */
 
       responseText = typeof responseText === 'string' ? responseText : String(responseText || '');
       this.logger.log(`[runAgentTurn] Raw response: "${responseText.substring(0, 200)}"`);
 
-      const toolsUsed: string[] = []; // DB tools commented out for conversational mode
-
-      this.logger.log(`[runAgentTurn] Tools used: [${toolsUsed.join(', ') || 'none'}]`);
+      const toolsUsed: string[] = [];
 
       const isComplete = responseText.includes(CALL_COMPLETE_MARKER);
       this.logger.log(`[runAgentTurn] isComplete=${isComplete} (marker found: ${isComplete})`);
