@@ -1,64 +1,137 @@
-import { Injectable, Logger } from "@nestjs/common";
-import { ConfigService } from "@nestjs/config";
-import * as twilio from "twilio";
+import { Injectable, Logger, Inject, forwardRef } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import * as twilio from 'twilio';
+import { ClinicsService } from '../clinics/clinics.service';
 
 /**
- * Service responsible for interacting with Twilio Voice APIs and generating TwiML.
+ * Service responsible for interacting with Twilio Voice & SMS APIs and generating TwiML.
  * Configured with:
- * - Amazon Polly Neural voices for natural human inflection.
- * - Instant barge-in (caller speaks -> agent stops speaking immediately).
- * - Fast silence cut-off (speechTimeout=1s) to eliminate dead air.
- * - Dual-input mode (speech + DTMF keypad press) for high accuracy.
- * - Bilingual support for English and French.
+ * - Dynamic Clinic-Specific Twilio credentials & phone numbers
+ * - Amazon Polly Neural voices (Danielle for en-US, Lea for fr-FR)
+ * - Inbound & Outbound call workflows
+ * - SMS sending and incoming SMS response parsing
+ * - Bilingual scripts for English & French
  */
 @Injectable()
 export class TwilioService {
   private readonly logger = new Logger(TwilioService.name);
-  private readonly client: twilio.Twilio;
+  private readonly defaultClient: twilio.Twilio;
+  private readonly clinicClients = new Map<string, twilio.Twilio>();
 
-  constructor(private readonly configService: ConfigService) {
-    const accountSid = this.configService.get<string>("TWILIO_ACCOUNT_SID");
-    const authToken = this.configService.get<string>("TWILIO_AUTH_TOKEN");
-    this.client = twilio.default(accountSid, authToken);
+  constructor(
+    private readonly configService: ConfigService,
+    @Inject(forwardRef(() => ClinicsService))
+    private readonly clinicsService: ClinicsService,
+  ) {
+    const accountSid = this.configService.get<string>('TWILIO_ACCOUNT_SID');
+    const authToken = this.configService.get<string>('TWILIO_AUTH_TOKEN');
+    this.defaultClient = this.createClient(accountSid, authToken);
+  }
+
+  private createClient(accountSid?: string, authToken?: string): twilio.Twilio {
+    const factory: any = (twilio as any).default || twilio;
+    return typeof factory === 'function' ? factory(accountSid, authToken) : new factory(accountSid, authToken);
   }
 
   /**
-   * Initiates an outbound telephone call to the target phone number.
-   *
-   * @param to Destination phone number in E.164 format.
-   * @param webhookBaseUrl Publicly accessible base URL (e.g. ngrok or cloudflared).
-   * @param aiCallId Unique database identifier for this call.
+   * Resolves the appropriate Twilio Client and caller phone number
+   * using clinic-specific credentials if available, otherwise defaulting to system credentials.
+   */
+  public async getClientForClinic(clinicId?: string): Promise<{
+    client: twilio.Twilio;
+    fromNumber: string;
+  }> {
+    const defaultFrom = this.configService.get<string>('TWILIO_PHONE_NUMBER');
+
+    if (!clinicId) {
+      return { client: this.defaultClient, fromNumber: defaultFrom };
+    }
+
+    try {
+      const clinic = await this.clinicsService.findById(clinicId);
+      if (clinic?.twilioAccountSid && clinic?.twilioAuthToken) {
+        if (!this.clinicClients.has(clinicId)) {
+          this.clinicClients.set(
+            clinicId,
+            this.createClient(clinic.twilioAccountSid, clinic.twilioAuthToken),
+          );
+        }
+        return {
+          client: this.clinicClients.get(clinicId)!,
+          fromNumber: clinic.twilioPhoneNumber || defaultFrom,
+        };
+      }
+
+      if (clinic?.twilioPhoneNumber) {
+        return { client: this.defaultClient, fromNumber: clinic.twilioPhoneNumber };
+      }
+    } catch (err: any) {
+      this.logger.warn(`Could not resolve clinic credentials for ${clinicId}: ${err?.message}`);
+    }
+
+    return { client: this.defaultClient, fromNumber: defaultFrom };
+  }
+
+  /**
+   * Initiates an outbound telephone call with clinic-specific credentials.
    */
   public async createOutboundCall(
     to: string,
     webhookBaseUrl: string,
     aiCallId: string,
+    clinicId?: string,
   ): Promise<{ callSid: string }> {
     try {
+      const { client, fromNumber } = await this.getClientForClinic(clinicId);
       this.logger.log(
-        `Creating outbound call to [REDACTED] for callId=${aiCallId}`,
+        `Creating outbound call to [REDACTED] from ${fromNumber} for callId=${aiCallId} (clinic=${clinicId || 'default'})`,
       );
-      const call = await this.client.calls.create({
+
+      const call = await client.calls.create({
         to,
-        from: this.configService.get<string>("TWILIO_PHONE_NUMBER"),
+        from: fromNumber,
         url: `${webhookBaseUrl}/ai-call/twilio/voice?callId=${aiCallId}`,
         statusCallback: `${webhookBaseUrl}/ai-call/twilio/status`,
-        statusCallbackMethod: "POST",
-        statusCallbackEvent: ["initiated", "ringing", "answered", "completed"],
+        statusCallbackMethod: 'POST',
+        statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
+        machineDetection: 'Enable',
       });
+
       this.logger.log(`Outbound call created: SID=${call.sid}`);
       return { callSid: call.sid };
-    } catch (error) {
-      this.logger.error(
-        "Failed to create outbound Twilio call",
-        error?.message,
-      );
+    } catch (error: any) {
+      this.logger.error('Failed to create outbound Twilio call', error?.message);
       throw error;
     }
   }
 
   /**
-   * Validates the cryptographic signature of incoming Twilio webhooks.
+   * Sends an SMS message to a patient via Twilio.
+   */
+  public async sendSms(
+    to: string,
+    body: string,
+    clinicId?: string,
+  ): Promise<{ messageSid: string; success: boolean }> {
+    try {
+      const { client, fromNumber } = await this.getClientForClinic(clinicId);
+      this.logger.log(`Sending SMS to [REDACTED] from ${fromNumber}: "${body.substring(0, 50)}..."`);
+
+      const message = await client.messages.create({
+        to,
+        from: fromNumber,
+        body,
+      });
+
+      return { messageSid: message.sid, success: true };
+    } catch (error: any) {
+      this.logger.error(`Failed to send SMS to ${to}: ${error?.message}`);
+      return { messageSid: '', success: false };
+    }
+  }
+
+  /**
+   * Validates cryptographic signature of incoming Twilio requests.
    */
   public validateWebhookSignature(
     authToken: string,
@@ -69,24 +142,16 @@ export class TwilioService {
     try {
       return twilio.validateRequest(authToken, signature, url, params);
     } catch (error) {
-      this.logger.error("Error validating Twilio webhook signature", error);
+      this.logger.error('Error validating Twilio webhook signature', error);
       return false;
     }
   }
 
   /**
-   * Turn 1 Language Selection TwiML:
-   * Greets the caller upon answering and prompts for language preference:
-   * - English: "For English, press 1 or say English. For French, press 2 or say French." (Polly.Danielle-Neural)
-   * - French: "Pour le français, appuyez sur 2 ou dites Français." (Polly.Lea-Neural)
-   *
-   * Features:
-   * - bargeIn="false": Guaranteed full instruction playback without being cut off by phone pickup noise or echo.
-   * - speechTimeout="auto": Intelligent silence detection prevents premature cutoffs.
-   * - Fallback: Gracefully defaults to English if no response after 6 seconds.
+   * Turn 1 Language Selection TwiML for Outbound Calls.
    */
   public generateLanguageSelectionTwiML(actionUrl: string): string {
-    const separator = actionUrl.includes("?") ? "&amp;" : "?";
+    const separator = actionUrl.includes('?') ? '&amp;' : '?';
     const fallbackRedirectUrl = `${actionUrl}${separator}defaultLang=en`;
 
     return `<?xml version="1.0" encoding="UTF-8"?>
@@ -101,36 +166,51 @@ export class TwilioService {
   }
 
   /**
-   * Generates multi-turn conversational TwiML.
-   *
-   * Architecture: Seamless Gather with nested <Say> and bargeIn="false":
-   * 1. <Say> prompt plays to 100% completion without premature interruption.
-   * 2. Microphone opens the exact millisecond speech ends with zero audio clipping.
-   * 3. Google's Enhanced Telephony model (speechModel="phone_call", enhanced="true")
-   *    provides maximum transcription accuracy (54% lower error rate on phone audio).
-   * 4. speechTimeout="2" gives caller 2 seconds natural pause to finish thoughts.
-   * 5. Clean vocabulary hints prime Twilio's engine for medical scheduling terms.
-   *
-   * @param text The conversational response text from the AI assistant.
-   * @param actionUrl The webhook URL Twilio should POST to with the user's reply.
-   * @param language The language code ('en' or 'fr').
+   * TwiML for Inbound Calls from Patients.
    */
-  public generateGatherTwiML(
-    text: string,
-    actionUrl: string,
-    language?: string,
-  ): string {
-    const isFrench = language === "fr";
-    const lang = isFrench ? "fr-FR" : "en-US";
-    const voice = isFrench ? "Polly.Lea-Neural" : "Polly.Danielle-Neural";
+  public generateIncomingCallTwiML(actionUrl: string, clinicName: string = 'our medical clinic'): string {
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Gather input="speech dtmf" numDigits="1" action="${actionUrl}" method="POST" language="en-US" bargeIn="false" speechTimeout="auto" timeout="6" hints="English, French, Français, one, two, un, deux">
+    <Say voice="Polly.Danielle-Neural" language="en-US">Thank you for calling ${clinicName}. For English, press 1 or say English. For French, press 2 or say French.</Say>
+    <Say voice="Polly.Lea-Neural" language="fr-FR">Merci d'avoir appelé notre clinique. Pour le français, appuyez sur 2 ou dites Français.</Say>
+  </Gather>
+  <Say voice="Polly.Danielle-Neural" language="en-US">Continuing in English.</Say>
+  <Redirect method="POST">${actionUrl}?defaultLang=en</Redirect>
+</Response>`;
+  }
 
-    // Google's Enhanced Telephony model trained on 100,000+ hours of phone audio
-    const speechModel = "phone_call";
+  /**
+   * Scenario 3: Approved Voicemail TwiML when patient does not answer.
+   */
+  public generateVoicemailTwiML(clinicName: string = 'our medical clinic', language: string = 'en'): string {
+    const isFrench = language === 'fr';
+    const voice = isFrench ? 'Polly.Lea-Neural' : 'Polly.Danielle-Neural';
+    const lang = isFrench ? 'fr-FR' : 'en-US';
 
-    // Clean vocabulary hints without apostrophes or XML-breaking characters
+    const message = isFrench
+      ? `Bonjour, ici le secrétariat médical automatisé de ${clinicName}. Nous vous appelons concernant votre rendez-vous. Nous vous avons également envoyé un SMS. Veuillez répondre à notre SMS ou nous rappeler pour confirmer ou modifier votre rendez-vous. Merci et bonne journée.`
+      : `Hello, this is the automated scheduling assistant calling from ${clinicName}. We are calling regarding your medical appointment. We have also sent you a text message. Please reply to our SMS or call us back to confirm or schedule your appointment. Thank you and have a wonderful day.`;
+
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="${voice}" language="${lang}">${message}</Say>
+  <Hangup/>
+</Response>`;
+  }
+
+  /**
+   * Multi-turn conversational TwiML generator.
+   */
+  public generateGatherTwiML(text: string, actionUrl: string, language?: string): string {
+    const isFrench = language === 'fr';
+    const lang = isFrench ? 'fr-FR' : 'en-US';
+    const voice = isFrench ? 'Polly.Lea-Neural' : 'Polly.Danielle-Neural';
+    const speechModel = 'phone_call';
+
     const hints = isFrench
-      ? "confirmer, annuler, reporter, oui, non, francais, Docteur, rendez-vous, matin, apres-midi, lundi, mardi, mercredi, jeudi, vendredi, samedi, dimanche, satisfait, merci, au revoir, un, deux, trois, quatre, cinq, six, sept, huit, neuf, dix, demain, aujourd hui, semaine prochaine"
-      : "confirm, cancel, reschedule, yes, no, English, Doctor, appointment, morning, afternoon, Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, Sunday, satisfied, thank you, goodbye, one, two, three, four, five, six, seven, eight, nine, ten, tomorrow, next week, today";
+      ? 'confirmer, annuler, reporter, oui, non, francais, Docteur, rendez-vous, matin, apres-midi, lundi, mardi, mercredi, jeudi, vendredi, samedi, dimanche, satisfait, merci, au revoir, un, deux, trois, quatre, cinq'
+      : 'confirm, cancel, reschedule, yes, no, English, Doctor, appointment, morning, afternoon, Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, Sunday, satisfied, thank you, goodbye, one, two, three, four, five';
 
     const fallbackNoInput = isFrench
       ? "Je n'ai pas entendu de réponse. Au revoir."
@@ -149,15 +229,10 @@ export class TwilioService {
 </Response>`;
   }
 
-  /**
-   * Generates a final statement and hangs up the call.
-   * Used when an appointment action is complete and the patient is satisfied.
-   */
-  public generateTwiML(text: string, language?: string): string {
-    const isFrench = language === "fr";
-    const lang = isFrench ? "fr-FR" : "en-US";
-    const voice = isFrench ? "Polly.Lea-Neural" : "Polly.Danielle-Neural";
-
+  public generateHangupTwiML(text: string, language?: string): string {
+    const isFrench = language === 'fr';
+    const lang = isFrench ? 'fr-FR' : 'en-US';
+    const voice = isFrench ? 'Polly.Lea-Neural' : 'Polly.Danielle-Neural';
     const normalized = this.normalizeForTTS(text, language);
     const escaped = this.escapeXml(normalized);
 
@@ -168,54 +243,29 @@ export class TwilioService {
 </Response>`;
   }
 
-  public generateHangupTwiML(text: string, language?: string): string {
-    return this.generateTwiML(text, language);
-  }
-
-  /**
-   * Pre-formats raw text into speakable phonetics for Text-to-Speech:
-   * - Strips markdown formatting (*, #, _) and internal [CALL_COMPLETE] tokens.
-   * - Expands medical abbreviations (Dr. -> Doctor / Docteur).
-   * - Normalizes patient/appointment IDs for clear letter-by-letter pronunciation.
-   */
-  public normalizeForTTS(text: string, language?: string): string {
-    if (!text) return "";
-
-    let cleaned = text
-      .replace(/\[CALL_COMPLETE\]/gi, "")
-      .replace(/[*_#`~]/g, "")
-      .trim();
-
-    if (language === "fr") {
-      cleaned = cleaned
-        .replace(/\bDr\./gi, "Docteur")
-        .replace(/\bDre\./gi, "Docteure")
-        .replace(/\bM\./gi, "Monsieur")
-        .replace(/\bMme\./gi, "Madame")
-        .replace(/\bApt\./gi, "Rendez-vous")
-        .replace(/\bPAT-(\d+)/gi, "P A T $1")
-        .replace(/\bAPT-(\d+)/gi, "A P T $1");
+  private normalizeForTTS(text: string, language?: string): string {
+    if (!text) return '';
+    let result = text;
+    if (language === 'fr') {
+      result = result
+        .replace(/\bDr\.?\s+/gi, 'Docteur ')
+        .replace(/\bM\.\s+/gi, 'Monsieur ')
+        .replace(/\bMme\.\s+/gi, 'Madame ');
     } else {
-      cleaned = cleaned
-        .replace(/\bDr\./gi, "Doctor")
-        .replace(/\bApt\./gi, "Appointment")
-        .replace(/\bSt\./gi, "Street")
-        .replace(/\bPAT-(\d+)/gi, "P A T $1")
-        .replace(/\bAPT-(\d+)/gi, "A P T $1");
+      result = result
+        .replace(/\bDr\.?\s+/gi, 'Doctor ')
+        .replace(/\bSt\.?\s+/gi, 'Street ')
+        .replace(/\bAve\.?\s+/gi, 'Avenue ');
     }
-
-    return cleaned;
+    return result;
   }
 
-  /**
-   * XML entity escaping for safe TwiML injection.
-   */
-  public escapeXml(text: string): string {
-    return text
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&apos;");
+  private escapeXml(unsafe: string): string {
+    return unsafe
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&apos;');
   }
 }

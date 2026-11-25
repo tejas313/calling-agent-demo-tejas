@@ -18,27 +18,15 @@ export class AiCallController {
   @Throttle({ default: { limit: 10, ttl: 60000 } })
   @ApiOperation({
     summary: 'Start an AI outbound call',
-    description:
-      'Initiates an outbound Twilio call and starts the AI appointment confirmation agent',
+    description: 'Initiates an outbound Twilio call using clinic-specific credentials',
   })
   @ApiBody({ type: StartCallDto })
-  @ApiResponse({
-    status: 201,
-    description: 'Call initiated successfully',
-    schema: {
-      example: { success: true, callId: 'uuid', twilioCallSid: 'CAxxxxx', status: 'initiated' },
-    },
-  })
-  @ApiResponse({ status: 400, description: 'Invalid request' })
-  @ApiResponse({ status: 429, description: 'Rate limit exceeded' })
   async startCall(@Body() dto: StartCallDto) {
     return this.aiCallService.startCall(dto);
   }
 
   @Get(':id')
   @ApiOperation({ summary: 'Get AI call record' })
-  @ApiResponse({ status: 200, description: 'Call record' })
-  @ApiResponse({ status: 404, description: 'Call not found' })
   async getCall(@Param('id') id: string) {
     return this.aiCallService.getCall(id);
   }
@@ -57,42 +45,89 @@ export class AiCallController {
     @Query('callId') callId: string,
     @Res() res: Response,
   ) {
-    this.logger.log(`[POLL] 🔍 Poll request for callId=${callId}`);
     try {
       const twiml = await this.aiCallService.handlePollWebhook(callId);
       res.setHeader('Content-Type', 'text/xml');
       return res.send(twiml);
     } catch (error: any) {
-      this.logger.error(`[POLL] ❌ Error: ${error?.message}`);
-      const fallback = '<Response><Say voice="Polly.Danielle-Neural" language="en-US">We are experiencing technical difficulties. Goodbye.</Say><Hangup/></Response>';
+      this.logger.error(`[POLL] Error: ${error?.message}`);
+      const fallback =
+        '<Response><Say voice="Polly.Danielle-Neural" language="en-US">We are experiencing technical difficulties. Goodbye.</Say><Hangup/></Response>';
       res.setHeader('Content-Type', 'text/xml');
       return res.send(fallback);
     }
   }
 
   @SkipThrottle()
+  @Post('twilio/incoming')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Twilio Incoming Call Webhook',
+    description: 'Triggered when a patient calls the clinic phone number directly',
+  })
+  async handleIncomingCall(
+    @Body() body: any,
+    @Res() res: Response,
+  ) {
+    const from = body?.From || '';
+    const to = body?.To || '';
+    const callSid = body?.CallSid || '';
+
+    try {
+      const twiml = await this.aiCallService.handleIncomingCall(from, to, callSid);
+      res.setHeader('Content-Type', 'text/xml');
+      return res.send(twiml);
+    } catch (error: any) {
+      this.logger.error(`[INCOMING CALL] Error: ${error?.message}`);
+      const fallback =
+        '<Response><Say voice="Polly.Danielle-Neural" language="en-US">Thank you for calling. Our offices are currently closed. Goodbye.</Say><Hangup/></Response>';
+      res.setHeader('Content-Type', 'text/xml');
+      return res.send(fallback);
+    }
+  }
+
+  @SkipThrottle()
+  @Post('twilio/sms')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Twilio Incoming SMS Webhook (Scenario 19 & 20)',
+    description: 'Handles patient text responses (YES/NO/ambiguous queries)',
+  })
+  async handleIncomingSms(
+    @Body() body: any,
+    @Res() res: Response,
+  ) {
+    const from = body?.From || '';
+    const to = body?.To || '';
+    const text = body?.Body || '';
+    const messageSid = body?.MessageSid || '';
+
+    try {
+      const result = await this.aiCallService.handleIncomingSms(from, to, text, messageSid);
+      const twiml = `<Response><Message>${result.responseText}</Message></Response>`;
+      res.setHeader('Content-Type', 'text/xml');
+      return res.send(twiml);
+    } catch (error: any) {
+      this.logger.error(`[INCOMING SMS] Error: ${error?.message}`);
+      res.setHeader('Content-Type', 'text/xml');
+      return res.send('<Response></Response>');
+    }
+  }
+
+  @SkipThrottle()
   @Post('twilio/voice')
   @HttpCode(200)
-  @ApiOperation({ summary: 'Twilio voice webhook - handles incoming speech or keypad DTMF from patient' })
+  @ApiOperation({ summary: 'Twilio voice webhook - handles speech and DTMF keypad' })
   async handleVoiceWebhook(
     @Query('callId') rawCallId: string,
     @Query('defaultLang') defaultLang: string,
     @Body() body: TwilioVoiceDto,
     @Res() res: Response,
   ) {
-    // Defensive sanitization: extract clean UUID in case query strings were chained or malformed
     const callId = rawCallId ? rawCallId.split('?')[0].split('&')[0].trim() : '';
 
-    if (body?.SpeechResult) {
-      this.logger.log(`\n==================================================\n🎤 [CALLER SPOKE]\n🗣️ Text: "${body.SpeechResult}"\n📊 Confidence: ${body.Confidence || 'N/A'}\n🆔 CallId: ${callId}\n==================================================`);
-    } else if (body?.Digits) {
-      this.logger.log(`\n==================================================\n🔢 [CALLER PRESSED KEYPAD]\n🔘 Digits: "${body.Digits}"\n🆔 CallId: ${callId}\n==================================================`);
-    } else {
-      this.logger.log(`[WEBHOOK] Call connected / Turn initiated — CallSid=${body?.CallSid}, CallId=${callId}`);
-    }
-
     if (!callId) {
-      this.logger.error('[WEBHOOK] ❌ No callId in query params — Twilio webhook URL is misconfigured!');
+      this.logger.error('[WEBHOOK] No callId in query params');
       const twiml = '<Response><Say>Invalid call configuration.</Say><Hangup/></Response>';
       res.setHeader('Content-Type', 'text/xml');
       return res.send(twiml);
@@ -110,7 +145,7 @@ export class AiCallController {
       res.setHeader('Content-Type', 'text/xml');
       return res.send(twiml);
     } catch (error: any) {
-      this.logger.error(`[WEBHOOK] ❌ FATAL ERROR in handleVoiceWebhook for callId=${callId}: ${error?.message}`, error?.stack);
+      this.logger.error(`[WEBHOOK] Error: ${error?.message}`);
       const fallbackTwiml =
         '<Response><Say voice="Polly.Danielle-Neural" language="en-US">We are experiencing technical difficulties. Please call the clinic directly. Goodbye.</Say><Hangup/></Response>';
       res.setHeader('Content-Type', 'text/xml');

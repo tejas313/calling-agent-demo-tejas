@@ -5,58 +5,95 @@ import {
   CreateDateColumn,
   UpdateDateColumn,
 } from 'typeorm';
-import { CallStatus, CallOutcome, CallType } from '../../common/constants';
+import { CallStatus, CallOutcome, CallDirection } from '../../common/constants';
+
+export interface TranscriptEntry {
+  role: 'agent' | 'patient';
+  text: string;
+  timestamp: string;
+  confidence?: number;
+}
 
 export interface ConversationMessage {
-  role: 'assistant' | 'user' | 'tool';
+  type: 'system' | 'human' | 'ai';
   content: string;
-  timestamp: string;
-  toolName?: string;
-  toolInput?: Record<string, any>;
-  toolOutput?: any;
 }
 
 @Entity('ai_calls')
 export class AiCall {
-  @PrimaryGeneratedColumn('uuid') id: string;
+  @PrimaryGeneratedColumn('uuid')
+  id: string;
 
-  @Column({ name: 'patient_id' }) patientId: string;
+  @Column({ name: 'patient_id' })
+  patientId: string;
 
-  @Column({ name: 'appointment_id' }) appointmentId: string;
+  @Column({ name: 'appointment_id', nullable: true })
+  appointmentId: string;
 
-  @Column({ name: 'clinic_id' }) clinicId: string;
+  @Column({ name: 'clinic_id', default: 'CLINIC-001' })
+  clinicId: string;
 
-  @Column({ name: 'phone_number' }) phoneNumber: string;
+  @Column({ name: 'phone_number' })
+  phoneNumber: string;
 
-  @Column({ name: 'twilio_call_sid', nullable: true }) twilioCallSid: string;
-
-  @Column({ default: 'en' }) language: string;
+  @Column({ name: 'twilio_call_sid', nullable: true })
+  twilioCallSid: string;
 
   @Column({
-    name: 'call_type',
     type: 'enum',
-    enum: CallType,
-    default: CallType.APPOINTMENT_CONFIRMATION,
+    enum: CallDirection,
+    default: CallDirection.OUTBOUND,
   })
-  callType: CallType;
+  direction: CallDirection;
 
-  @Column({ type: 'enum', enum: CallStatus, default: CallStatus.INITIATED }) status: CallStatus;
+  @Column({ default: 'en' })
+  language: string;
 
-  @Column({ type: 'enum', enum: CallOutcome, nullable: true }) outcome: CallOutcome;
+  @Column({ name: 'call_type', default: 'appointment_confirmation' })
+  callType: string;
 
-  @Column({ type: 'jsonb', default: [] }) transcript: ConversationMessage[];
+  @Column({
+    type: 'enum',
+    enum: CallStatus,
+    default: CallStatus.INITIATED,
+  })
+  status: CallStatus;
 
-  @Column({ name: 'conversation_history', type: 'jsonb', default: [] }) conversationHistory: any[];
+  @Column({
+    type: 'enum',
+    enum: CallOutcome,
+    nullable: true,
+  })
+  outcome: CallOutcome;
 
-  @Column({ name: 'current_turn', default: 0 }) currentTurn: number;
+  @Column({ type: 'jsonb', default: () => "'[]'" })
+  transcript: TranscriptEntry[];
 
-  @Column({ name: 'started_at', nullable: true }) startedAt: Date;
+  @Column({
+    name: 'conversation_history',
+    type: 'jsonb',
+    default: () => "'[]'",
+  })
+  conversationHistory: ConversationMessage[];
 
-  @Column({ name: 'ended_at', nullable: true }) endedAt: Date;
+  @Column({ name: 'current_turn', default: 0 })
+  currentTurn: number;
 
-  @Column({ nullable: true }) duration: number;
+  @Column({ name: 'started_at', nullable: true })
+  startedAt: Date;
 
-  @CreateDateColumn({ name: 'created_at' }) createdAt: Date;
+  @Column({ name: 'ended_at', nullable: true })
+  endedAt: Date;
 
-  @UpdateDateColumn({ name: 'updated_at' }) updatedAt: Date;
+  @Column({ nullable: true })
+  duration: number;
+
+  @Column({ type: 'text', nullable: true })
+  summary: string;
+
+  @CreateDateColumn({ name: 'created_at' })
+  createdAt: Date;
+
+  @UpdateDateColumn({ name: 'updated_at' })
+  updatedAt: Date;
 }

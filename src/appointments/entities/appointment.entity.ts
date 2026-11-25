@@ -1,5 +1,5 @@
 import { Entity, PrimaryColumn, Column, CreateDateColumn, UpdateDateColumn } from 'typeorm';
-import { AppointmentStatus } from '../../common/constants';
+import { AppointmentStatus, ClinicalPriority } from '../../common/constants';
 
 @Entity('appointments')
 export class Appointment {
@@ -19,6 +19,28 @@ export class Appointment {
 
   @Column({ type: 'enum', enum: AppointmentStatus, default: AppointmentStatus.PENDING })
   status: AppointmentStatus;
+
+  @Column({
+    type: 'enum',
+    enum: ClinicalPriority,
+    default: ClinicalPriority.ROUTINE,
+  })
+  priority: ClinicalPriority;
+
+  @Column({ name: 'is_overbooked', default: false })
+  isOverbooked: boolean;
+
+  @Column({ name: 'overbooking_approved_by', nullable: true })
+  overbookingApprovedBy: string;
+
+  @Column({ name: 'reminder_sent_7days', default: false })
+  reminderSent7Days: boolean;
+
+  @Column({ name: 'reminder_sent_72hours', default: false })
+  reminderSent72Hours: boolean;
+
+  @Column({ name: 'hold_expires_at', type: 'timestamp', nullable: true })
+  holdExpiresAt: Date;
 
   @Column({ nullable: true }) notes: string;
 

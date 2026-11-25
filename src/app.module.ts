@@ -9,6 +9,10 @@ import { AppointmentsModule } from './appointments/appointments.module';
 import { LangchainModule } from './langchain/langchain.module';
 import { TwilioModule } from './twilio/twilio.module';
 import { AiCallModule } from './ai-call/ai-call.module';
+import { ClinicsModule } from './clinics/clinics.module';
+import { PhysiciansModule } from './physicians/physicians.module';
+import { ReferralsModule } from './referrals/referrals.module';
+import { WaitlistModule } from './waitlist/waitlist.module';
 
 @Module({
   imports: [
@@ -20,13 +24,17 @@ import { AiCallModule } from './ai-call/ai-call.module';
       {
         name: 'default',
         ttl: 60000,
-        limit: 10,
+        limit: 20,
       },
     ]),
     DatabaseModule,
     LangsmithModule,
+    ClinicsModule,
+    PhysiciansModule,
     PatientsModule,
     AppointmentsModule,
+    ReferralsModule,
+    WaitlistModule,
     LangchainModule,
     TwilioModule,
     AiCallModule,

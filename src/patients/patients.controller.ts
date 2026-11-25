@@ -2,6 +2,7 @@ import { Controller, Get, Param } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { PatientsService } from './patients.service';
 import { Patient } from './entities/patient.entity';
+import { CommunicationLog } from './entities/communication-log.entity';
 
 @ApiTags('Patients')
 @Controller('patients')
@@ -21,5 +22,12 @@ export class PatientsController {
   @ApiResponse({ status: 404, description: 'Patient not found.' })
   async findById(@Param('id') id: string): Promise<Patient> {
     return this.patientsService.findById(id);
+  }
+
+  @Get(':id/chart')
+  @ApiOperation({ summary: 'Get full patient communication and interaction chart log' })
+  @ApiResponse({ status: 200, description: 'Patient communication history from chart' })
+  async getChart(@Param('id') id: string): Promise<CommunicationLog[]> {
+    return this.patientsService.getChartLogs(id);
   }
 }
