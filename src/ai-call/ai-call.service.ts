@@ -10,7 +10,16 @@ import { Repository } from "typeorm";
 import { ConfigService } from "@nestjs/config";
 import { HumanMessage, AIMessage, BaseMessage } from "@langchain/core/messages";
 import { parsePhoneNumber, isValidPhoneNumber } from "libphonenumber-js";
-import { AiCall, ConversationMessage } from "./entities/ai-call.entity";
+import dayjs from "dayjs";
+import {
+  AiCall,
+  ConversationMessage,
+  PatientAppointmentBooking,
+  PatientProfile,
+  PhysicianClinicProfile,
+  PhysicianPatientSlot,
+  TriageAssignment,
+} from "../entities";
 import { StartCallDto } from "./dto/start-call.dto";
 import { TwilioService } from "../twilio/twilio.service";
 import { AgentService } from "../langchain/agent/agent.service";
@@ -19,31 +28,50 @@ import { CallStatus, CallOutcome, MAX_CALL_TURNS } from "../common/constants";
 @Injectable()
 export class AiCallService {
   private readonly logger = new Logger(AiCallService.name);
-  // In-memory store: callId -> TwiML string when ready, null while pending
   private readonly pendingResponses = new Map<string, string | null>();
 
   constructor(
     @InjectRepository(AiCall)
     private readonly aiCallRepository: Repository<AiCall>,
+    @InjectRepository(PatientProfile)
+    private readonly patientProfileRepository: Repository<PatientProfile>,
+    @InjectRepository(TriageAssignment)
+    private readonly triageAssignmentRepository: Repository<TriageAssignment>,
+    @InjectRepository(PhysicianClinicProfile)
+    private readonly physicianClinicProfileRepository: Repository<PhysicianClinicProfile>,
+    @InjectRepository(PhysicianPatientSlot)
+    private readonly physicianPatientSlotRepository: Repository<PhysicianPatientSlot>,
+    @InjectRepository(PatientAppointmentBooking)
+    private readonly bookingRepository: Repository<PatientAppointmentBooking>,
     private readonly twilioService: TwilioService,
     private readonly agentService: AgentService,
     private readonly configService: ConfigService,
   ) {}
 
   /**
-   * Initiates an outbound AI call.
-   * Validates phone number format, creates the database record, and places the Twilio call.
+   * Initiates an outbound AI call:
+   * 1. Validates phone number in E.164 format.
+   * 2. Looks up patient_profiles using patientId.
+   * 3. Looks up triage_assignments using assignmentsId to read approvedDate, scheduleCount, scheduleUnit (1=days, 2=weeks, 3=months).
+   * 4. Verifies physician_clinic_profiles for clinicId & assigned_physician_id.
+   * 5. Queries physician_patient_slots for the first available slot (status = 1) on/after approvedDate + scheduleCount * scheduleUnit.
+   * 6. Creates the AiCall record and places the Twilio call (unless testMode is true).
    */
   async startCall(dto: StartCallDto): Promise<{
     success: boolean;
     callId: string;
     twilioCallSid: string;
     status: string;
+    slot?: {
+      id: string;
+      date: string;
+      startTime: string;
+      endTime: string;
+    } | null;
     testMode?: boolean;
     webhookUrl?: string;
     hint?: string;
   }> {
-    // Validate phone number format & type
     if (!isValidPhoneNumber(dto.phoneNumber)) {
       this.logger.warn(`Invalid phone number provided: ${dto.phoneNumber}`);
       throw new BadRequestException(
@@ -52,15 +80,90 @@ export class AiCallService {
     }
 
     const parsedNumber = parsePhoneNumber(dto.phoneNumber);
-    this.logger.log(
-      `[Phone Validation] Country=${parsedNumber.country}, Type=${parsedNumber.getType() || "UNKNOWN"}, E.164=${parsedNumber.format("E.164")}, National=${parsedNumber.formatNational()}`,
-    );
-
-    // Ensure phone number is in standardized E.164 format
     dto.phoneNumber = parsedNumber.format("E.164");
 
+    // 1. Find patient in patient_profiles
+    const patient = await this.patientProfileRepository.findOne({
+      where: { id: dto.patientId },
+    });
+    if (!patient) {
+      throw new NotFoundException(`Patient profile with ID ${dto.patientId} not found`);
+    }
+
+    // 2. Find triage assignment in triage_assignments
+    const assignment = await this.triageAssignmentRepository.findOne({
+      where: { id: dto.assignmentsId },
+    });
+    if (!assignment) {
+      throw new NotFoundException(`Triage assignment with ID ${dto.assignmentsId} not found`);
+    }
+
+    // 3. Determine and verify physician in physician_clinic_profiles
+    const physicianId = dto.assigned_physician_id || assignment.assignedPhysicianId;
+    if (!physicianId) {
+      throw new BadRequestException(
+        "assigned_physician_id is required (not found in request or triage_assignments)",
+      );
+    }
+
+    const physicianProfile = await this.physicianClinicProfileRepository.findOne({
+      where: { id: physicianId, clinicId: dto.clinicId },
+    });
+    if (!physicianProfile) {
+      throw new NotFoundException(
+        `Physician profile ${physicianId} not found for clinic ${dto.clinicId}`,
+      );
+    }
+
+    // 4. Calculate minimum eligible slot date from approvedDate + scheduleCount * scheduleUnit
+    // scheduleUnit: 1 = days, 2 = weeks, 3 = months
+    const baseDate = assignment.approvedDate ? dayjs(assignment.approvedDate) : dayjs();
+    const count = assignment.scheduleCount || 0;
+    const unitMap: Record<number, "day" | "week" | "month"> = {
+      1: "day",
+      2: "week",
+      3: "month",
+    };
+    const unit = unitMap[assignment.scheduleUnit || 1] || "day";
+    const targetDate = count > 0
+      ? baseDate.add(count, unit).format("YYYY-MM-DD")
+      : baseDate.format("YYYY-MM-DD");
+
+    this.logger.log(
+      `[Slot Lookup] patientId=${dto.patientId}, clinicId=${dto.clinicId}, physicianId=${physicianId}, approvedDate=${baseDate.format("YYYY-MM-DD")}, scheduleCount=${count}, scheduleUnit=${assignment.scheduleUnit}, targetDate=${targetDate}`,
+    );
+
+    // 5. Fetch first available slot in physician_patient_slots with status = 1 and date >= targetDate
+    const availableSlot = await this.physicianPatientSlotRepository
+      .createQueryBuilder("slot")
+      .where("slot.clinic_id = :clinicId", { clinicId: dto.clinicId })
+      .andWhere("slot.physician_profile_id = :physicianId", { physicianId })
+      .andWhere("slot.status = :status", { status: 1 })
+      .andWhere("slot.date >= :targetDate", { targetDate })
+      .orderBy("slot.date", "ASC")
+      .addOrderBy("slot.startTime", "ASC")
+      .getOne();
+
+    if (!availableSlot) {
+      throw new NotFoundException(
+        `No available slot (status=1) found for physician ${physicianId} in clinic ${dto.clinicId} on or after ${targetDate}`,
+      );
+    }
+
+    this.logger.log(
+      `[Slot Found] slotId=${availableSlot.id}, date=${availableSlot.date}, time=${availableSlot.startTime}-${availableSlot.endTime}`,
+    );
+
     const aiCall = this.aiCallRepository.create({
-      ...dto,
+      patientId: dto.patientId,
+      clinicId: dto.clinicId,
+      assignmentsId: dto.assignmentsId,
+      assignedPhysicianId: physicianId,
+      slotId: availableSlot.id,
+      appointmentId: dto.assignmentsId,
+      phoneNumber: dto.phoneNumber,
+      language: dto.language || "en",
+      callType: dto.callType,
       status: CallStatus.INITIATED,
       currentTurn: 0,
       transcript: [],
@@ -74,7 +177,13 @@ export class AiCallService {
       throw new Error("PUBLIC_BASE_URL is not configured");
     }
 
-    // TEST MODE: skip the real Twilio call, return callId for manual webhook testing
+    const slotSummary = {
+      id: availableSlot.id,
+      date: availableSlot.date,
+      startTime: availableSlot.startTime,
+      endTime: availableSlot.endTime,
+    };
+
     if (dto.testMode) {
       aiCall.twilioCallSid = "TEST-MODE-NO-CALL";
       aiCall.startedAt = new Date();
@@ -87,6 +196,7 @@ export class AiCallService {
         callId: aiCall.id,
         twilioCallSid: "TEST-MODE-NO-CALL",
         status: "initiated",
+        slot: slotSummary,
         testMode: true,
         webhookUrl: `POST /ai-call/twilio/voice?callId=${aiCall.id}`,
         hint: 'Send { "SpeechResult": "English" } or { "Digits": "1" } to select language and start',
@@ -109,12 +219,12 @@ export class AiCallService {
         callId: aiCall.id,
         twilioCallSid,
         status: "initiated",
+        slot: slotSummary,
       };
     } catch (error: any) {
       aiCall.status = CallStatus.FAILED;
       await this.aiCallRepository.save(aiCall);
 
-      // Log exact raw error from Twilio
       this.logger.error(
         `Twilio Error Code: ${error?.code}, Message: ${error?.message}`,
       );
@@ -134,13 +244,6 @@ export class AiCallService {
     }
   }
 
-  /**
-   * Main Twilio Voice Webhook Handler.
-   * Handles:
-   * - Turn 1: Presents bilingual language prompt (English / French).
-   * - Turn 2: Detects chosen language (speech or DTMF), sets language in DB, delivers greeting.
-   * - Subsequent Turns: Runs conversational LLM reasoning with instant barge-in and validation.
-   */
   async handleVoiceWebhook(
     callId: string,
     speechResult: string | undefined,
@@ -157,9 +260,6 @@ export class AiCallService {
       where: { id: callId },
     });
     if (!aiCall) {
-      this.logger.error(
-        `[handleVoiceWebhook] ❌ No AiCall record found for callId=${callId}`,
-      );
       throw new NotFoundException(`AiCall with id ${callId} not found`);
     }
 
@@ -177,13 +277,9 @@ export class AiCallService {
     if (aiCall.currentTurn === 0 && !speechResult && !digits) {
       aiCall.currentTurn = 1;
       await this.aiCallRepository.save(aiCall);
-      this.logger.log(
-        `[handleVoiceWebhook] 🌐 Turn 1 connected — presenting language selection (English / French).`,
-      );
       return this.twilioService.generateLanguageSelectionTwiML(actionUrl);
     }
 
-    // Process inputs
     const digitsInput = (digits || "").trim();
     const speechLower = (speechResult || "").toLowerCase().trim();
     const parsedConfidence =
@@ -191,9 +287,6 @@ export class AiCallService {
         ? parseFloat(confidence.toString())
         : 1.0;
 
-    // Phantom acoustic noise filter:
-    // Confidence threshold raised to 0.3 to discard speakerphone echo, line static,
-    // and background sounds more reliably without discarding real caller speech.
     const isPhantomNoise =
       !digitsInput &&
       speechResult &&
@@ -205,32 +298,22 @@ export class AiCallService {
         `[handleVoiceWebhook] ⚠️ Phantom acoustic noise discarded (confidence=${confidence}, text="${speechResult}").`,
       );
       if (aiCall.currentTurn <= 1) {
-        // Still on Turn 1 language selection: replay language prompt
         return this.twilioService.generateLanguageSelectionTwiML(actionUrl);
       }
-      // Conversational turn: replay the last AI response so the caller hears the
-      // full message again, as if the echo never interrupted it.
-      // Never say "Sorry I didn't catch that" — the caller never actually spoke.
       const lastAiMessage = [...aiCall.transcript]
         .reverse()
         .find((msg) => msg.role === "assistant");
       if (lastAiMessage?.content) {
-        this.logger.log(
-          `[handleVoiceWebhook] 🔁 Replaying last AI response after phantom noise: "${lastAiMessage.content.substring(0, 80)}..."`,
-        );
         return this.twilioService.generateGatherTwiML(
           lastAiMessage.content,
           actionUrl,
           aiCall.language,
         );
       }
-      // No previous AI message in transcript yet — re-gather silently with a brief pause
-      this.logger.log(
-        `[handleVoiceWebhook] 🔁 No prior AI message to replay — re-gathering silently.`,
-      );
-      const silentRegather = aiCall.language === "fr"
-        ? "Désolée, pouvez-vous répéter?"
-        : "Sorry, could you repeat that please?";
+      const silentRegather =
+        aiCall.language === "fr"
+          ? "Désolée, pouvez-vous répéter?"
+          : "Sorry, could you repeat that please?";
       return this.twilioService.generateGatherTwiML(
         silentRegather,
         actionUrl,
@@ -239,14 +322,7 @@ export class AiCallService {
     }
 
     aiCall.currentTurn += 1;
-    this.logger.log(
-      `[handleVoiceWebhook] Turn #${aiCall.currentTurn} of max ${MAX_CALL_TURNS}`,
-    );
-
     if (aiCall.currentTurn > MAX_CALL_TURNS) {
-      this.logger.warn(
-        `[handleVoiceWebhook] Max turns reached for callId=${callId}`,
-      );
       const maxTurnMsg =
         aiCall.language === "fr"
           ? "Je suis désolée, nous avons atteint la durée maximale d'appel. Veuillez contacter directement la clinique. Au revoir."
@@ -254,22 +330,16 @@ export class AiCallService {
       return this.twilioService.generateTwiML(maxTurnMsg, aiCall.language);
     }
 
-    // Process language selection if on Turn 2 (or if user requested a language switch)
     let detectedLanguage = aiCall.language || "en";
     let userIntent = "";
 
-    // Common greeting words that callers say when first answering — not a language selection
     const isGreetingWord = [
       "hello", "hi", "hey", "yes", "yeah", "yep", "sure", "okay", "ok",
       "bonjour", "allô", "allo", "oui",
     ].includes(speechLower.replace(/[?.!,]/g, "").trim());
 
     if (defaultLang === "en") {
-      // Fallback: caller was silent for 6s — default to English
       detectedLanguage = "en";
-      this.logger.log(
-        `[handleVoiceWebhook] 🇬🇧 Fallback default language activated: English (via timeout redirect)`,
-      );
     } else if (
       digitsInput === "1" ||
       speechLower === "english" ||
@@ -278,9 +348,6 @@ export class AiCallService {
       speechLower === "one"
     ) {
       detectedLanguage = "en";
-      this.logger.log(
-        `[handleVoiceWebhook] 🇬🇧 Language selected: English (via ${digitsInput ? "DTMF 1" : "Speech"})`,
-      );
     } else if (
       digitsInput === "2" ||
       speechLower === "french" ||
@@ -291,52 +358,31 @@ export class AiCallService {
       speechLower === "two"
     ) {
       detectedLanguage = "fr";
-      this.logger.log(
-        `[handleVoiceWebhook] 🇫🇷 Language selected: French (via ${digitsInput ? "DTMF 2" : "Speech"})`,
-      );
     } else if (aiCall.currentTurn === 2 && isGreetingWord) {
-      // Turn 2: Caller said "Hello" or "Yes" etc. — treat as English confirmation.
-      // Do NOT send greeting words to the LLM; deliver the appointment greeting directly.
       detectedLanguage = "en";
-      this.logger.log(
-        `[handleVoiceWebhook] 🇬🇧 Greeting word "${speechResult}" on Turn 2 — defaulting to English, delivering greeting.`,
-      );
     } else if (this.isLikelyFrench(speechLower)) {
       detectedLanguage = "fr";
       userIntent = speechResult || "";
-      this.logger.log(
-        `[handleVoiceWebhook] 🇫🇷 Inferred French from utterance: "${speechResult}"`,
-      );
     } else if (speechResult) {
       userIntent = speechResult;
     }
 
-    // Conversational turn DTMF keypad fallback (100% fail-safe for noisy environments)
     if (aiCall.currentTurn > 2 && digitsInput) {
       if (digitsInput === "1") {
         userIntent =
           aiCall.language === "fr"
             ? "Je confirme mon rendez-vous."
             : "I would like to confirm my appointment.";
-        this.logger.log(
-          `[handleVoiceWebhook] 🔘 DTMF 1 pressed -> Mapped to Confirm Appointment`,
-        );
       } else if (digitsInput === "2") {
         userIntent =
           aiCall.language === "fr"
             ? "Je souhaite reporter mon rendez-vous."
             : "I would like to reschedule my appointment.";
-        this.logger.log(
-          `[handleVoiceWebhook] 🔘 DTMF 2 pressed -> Mapped to Reschedule Appointment`,
-        );
       } else if (digitsInput === "3") {
         userIntent =
           aiCall.language === "fr"
             ? "Je souhaite annuler mon rendez-vous."
             : "I would like to cancel my appointment.";
-        this.logger.log(
-          `[handleVoiceWebhook] 🔘 DTMF 3 pressed -> Mapped to Cancel Appointment`,
-        );
       }
     }
 
@@ -346,15 +392,12 @@ export class AiCallService {
     if (userIntent) {
       userMessage = userIntent;
     } else if (aiCall.currentTurn === 2) {
-      // Language just chosen (or defaulted) — trigger the appointment greeting, not LLM
       userMessage = "LANGUAGE_SELECTED";
     } else if (speechResult) {
       userMessage = speechResult;
     } else {
       userMessage = "HELLO";
     }
-
-    this.logger.log(`[handleVoiceWebhook] userMessage="${userMessage}", language=${aiCall.language}`);
 
     if (speechResult || userIntent) {
       aiCall.transcript.push({
@@ -368,32 +411,37 @@ export class AiCallService {
       aiCall.conversationHistory || [],
     );
 
-    // Save updated turn/status/language before going async
     await this.aiCallRepository.save(aiCall);
 
-    // Mark this callId as pending and start agent
     this.pendingResponses.set(callId, null);
-    const agentPromise = this.processAgentAsync(aiCall, userMessage, conversationHistory, publicBaseUrl);
+    const agentPromise = this.processAgentAsync(
+      aiCall,
+      userMessage,
+      conversationHistory,
+      publicBaseUrl,
+    );
 
-    // Wait up to 4.5 seconds for agent to respond directly
-    const timeoutPromise = new Promise<"TIMEOUT">((resolve) => setTimeout(() => resolve("TIMEOUT"), 4500));
-    const winner = await Promise.race([agentPromise.then(() => "DONE"), timeoutPromise]);
+    const timeoutPromise = new Promise<"TIMEOUT">((resolve) =>
+      setTimeout(() => resolve("TIMEOUT"), 4500),
+    );
+    const winner = await Promise.race([
+      agentPromise.then(() => "DONE"),
+      timeoutPromise,
+    ]);
 
     if (winner === "DONE") {
       const directTwiml = this.pendingResponses.get(callId);
       if (directTwiml) {
-        this.logger.log(`[handleVoiceWebhook] ⚡ Direct response ready in <4.5s. Returning TwiML directly!`);
         this.pendingResponses.delete(callId);
         return directTwiml;
       }
     }
 
-    // Agent is taking longer than 4.5s (e.g. multi-step tool calls):
-    this.logger.log(`[handleVoiceWebhook] ⏳ Agent needs more time (>4.5s). Sending courteous hold message to Twilio.`);
     const pollUrl = `${publicBaseUrl}/ai-call/twilio/poll?callId=${callId}`;
-    const holdSay = aiCall.language === "fr"
-      ? '<Say voice="Polly.Lea-Neural" language="fr-FR">Un instant s\'il vous plaît, je vérifie pour vous.</Say>'
-      : '<Say voice="Polly.Danielle-Neural" language="en-US">One moment please, checking that for you.</Say>';
+    const holdSay =
+      aiCall.language === "fr"
+        ? '<Say voice="Polly.Lea-Neural" language="fr-FR">Un instant s\'il vous plaît, je vérifie pour vous.</Say>'
+        : '<Say voice="Polly.Danielle-Neural" language="en-US">One moment please, checking that for you.</Say>';
     return `<?xml version="1.0" encoding="UTF-8"?><Response>${holdSay}<Pause length="1"/><Redirect method="POST">${pollUrl}</Redirect></Response>`;
   }
 
@@ -401,7 +449,7 @@ export class AiCallService {
     const frenchWords = [
       "bonjour", "oui", "non", "merci", "rendez-vous", "annuler", "confirmer",
       "reporter", "demain", "salut", "plaît", "plait", "docteur", "suis",
-      "horaire", "heure", "matin", "soir"
+      "horaire", "heure", "matin", "soir",
     ];
     return frenchWords.some((word) => text.includes(word));
   }
@@ -414,13 +462,12 @@ export class AiCallService {
   ): Promise<void> {
     const callId = aiCall.id;
     try {
-      this.logger.log(
-        `[processAgentAsync] 🤖 Running agent for callId=${callId}, userMessage="${userMessage}", language=${aiCall.language}`,
-      );
       const result = await this.agentService.runAgentTurn({
         callId: aiCall.id,
         patientId: aiCall.patientId,
-        appointmentId: aiCall.appointmentId,
+        assignmentsId: aiCall.assignmentsId,
+        assignedPhysicianId: aiCall.assignedPhysicianId,
+        slotId: aiCall.slotId,
         clinicId: aiCall.clinicId,
         twilioCallSid: aiCall.twilioCallSid,
         language: aiCall.language,
@@ -430,19 +477,14 @@ export class AiCallService {
         phoneNumber: aiCall.phoneNumber,
       });
 
-      this.logger.log(`\n==================================================\n🤖 [AI ASSISTANT REPLIED]\n💬 Text: "${result.response}"\n🛠️ Tools: [${result.toolsUsed?.join(", ") || "none"}]\n🏁 Call Complete: ${result.isComplete}\n==================================================`);
-
-      // Re-fetch fresh record to avoid stale overwrite
       const freshCall = await this.aiCallRepository.findOne({
         where: { id: callId },
       });
       if (!freshCall) {
-        this.logger.error(
-          `[processAgentAsync] ❌ Could not re-fetch AiCall for callId=${callId}`,
-        );
-        const errMsg = aiCall.language === "fr"
-          ? "Une erreur s'est produite. Veuillez appeler la clinique directement. Au revoir."
-          : "An error occurred. Please call the clinic directly. Goodbye.";
+        const errMsg =
+          aiCall.language === "fr"
+            ? "Une erreur s'est produite. Veuillez appeler la clinique directement. Au revoir."
+            : "An error occurred. Please call the clinic directly. Goodbye.";
         this.pendingResponses.set(
           callId,
           this.twilioService.generateTwiML(errMsg, aiCall.language),
@@ -455,15 +497,26 @@ export class AiCallService {
         content: result.response,
         timestamp: new Date().toISOString(),
       });
-      freshCall.conversationHistory = this.serializeHistory(
-        result.updatedHistory,
-      );
+      freshCall.conversationHistory = this.serializeHistory(result.updatedHistory);
 
       let twiml: string;
       if (result.isComplete) {
-        freshCall.outcome = this.detectOutcome(result.response);
+        const finalOutcome =
+          result.actionResult === "CONFIRMED"
+            ? CallOutcome.CONFIRMED
+            : result.actionResult === "CANCELLED"
+              ? CallOutcome.CANCELLED
+              : this.detectOutcome(result.response);
+
+        freshCall.outcome = finalOutcome;
         freshCall.status = CallStatus.COMPLETED;
         freshCall.endedAt = new Date();
+
+        // If confirmed, mark slot status = 2 and create booking in patient_appointment_bookings
+        if (finalOutcome === CallOutcome.CONFIRMED && freshCall.slotId) {
+          await this.bookConfirmedSlot(freshCall);
+        }
+
         this.logger.log(
           `[processAgentAsync] 📞 Call COMPLETE — outcome=${freshCall.outcome}`,
         );
@@ -473,9 +526,6 @@ export class AiCallService {
         );
       } else {
         const actionUrl = `${publicBaseUrl}/ai-call/twilio/voice?callId=${freshCall.id}`;
-        this.logger.log(
-          `[processAgentAsync] 🔄 Continuing — next webhook: ${actionUrl}`,
-        );
         twiml = this.twilioService.generateGatherTwiML(
           result.response,
           actionUrl,
@@ -484,19 +534,15 @@ export class AiCallService {
       }
 
       await this.aiCallRepository.save(freshCall);
-
-      this.logger.log(
-        `[processAgentAsync] 📤 TwiML stored for callId=${callId}. Poll will deliver it.`,
-      );
       this.pendingResponses.set(callId, twiml);
     } catch (error: any) {
       this.logger.error(
         `[processAgentAsync] ❌ Error for callId=${callId}: ${error?.name} — ${error?.message}`,
       );
-      this.logger.error(`[processAgentAsync] Stack:\n${error?.stack}`);
-      const fallbackMsg = aiCall.language === "fr"
-        ? "Nous éprouvons des difficultés techniques. Veuillez appeler la clinique directement. Au revoir."
-        : "We are experiencing technical difficulties. Please call the clinic directly. Goodbye.";
+      const fallbackMsg =
+        aiCall.language === "fr"
+          ? "Nous éprouvons des difficultés techniques. Veuillez appeler la clinique directement. Au revoir."
+          : "We are experiencing technical difficulties. Please call the clinic directly. Goodbye.";
       const fallback = this.twilioService.generateTwiML(
         fallbackMsg,
         aiCall.language,
@@ -505,16 +551,52 @@ export class AiCallService {
     }
   }
 
+  /**
+   * Marks the physician_patient_slots row as status = 2 (booked)
+   * and inserts a new appointment into patient_appointment_bookings.
+   */
+  private async bookConfirmedSlot(aiCall: AiCall): Promise<void> {
+    const slot = await this.physicianPatientSlotRepository.findOne({
+      where: { id: aiCall.slotId },
+    });
+    if (!slot) {
+      this.logger.warn(`[bookConfirmedSlot] Slot ${aiCall.slotId} not found.`);
+      return;
+    }
+
+    if (slot.status !== 2) {
+      slot.status = 2;
+      await this.physicianPatientSlotRepository.save(slot);
+    }
+
+    const existingBooking = await this.bookingRepository.findOne({
+      where: { patientSlotId: slot.id },
+    });
+
+    if (!existingBooking) {
+      const booking = this.bookingRepository.create({
+        patientId: aiCall.patientId,
+        clinicId: aiCall.clinicId,
+        physicianProfileId: slot.physicianProfileId,
+        patientSlotId: slot.id,
+        appointmentDate: slot.date,
+        startTime: slot.startTime,
+        endTime: slot.endTime,
+        status: 1,
+        bookedBy: 1,
+        patientNote: `Confirmed via AI call ${aiCall.id}`,
+      });
+      await this.bookingRepository.save(booking);
+      this.logger.log(
+        `[bookConfirmedSlot] ✅ Slot ${slot.id} marked status=2 and booking ${booking.id} created in patient_appointment_bookings.`,
+      );
+    }
+  }
+
   async handlePollWebhook(callId: string): Promise<string> {
-    this.logger.log(
-      `[handlePollWebhook] 🔍 Checking response for callId=${callId}`,
-    );
     const publicBaseUrl = this.configService.get<string>("PUBLIC_BASE_URL");
 
     if (!this.pendingResponses.has(callId)) {
-      this.logger.warn(
-        `[handlePollWebhook] ⚠️ No pending entry for callId=${callId} — may have already been delivered`,
-      );
       return this.twilioService.generateTwiML(
         "An error occurred. Please call the clinic directly. Goodbye.",
         "en",
@@ -522,20 +604,11 @@ export class AiCallService {
     }
 
     const twiml = this.pendingResponses.get(callId);
-
     if (twiml === null) {
-      // Still processing — tell Twilio to pause and poll again
-      this.logger.log(
-        `[handlePollWebhook] ⏳ Agent still processing for callId=${callId}. Sending another pause+redirect.`,
-      );
       const pollUrl = `${publicBaseUrl}/ai-call/twilio/poll?callId=${callId}`;
       return `<?xml version="1.0" encoding="UTF-8"?><Response><Pause length="2"/><Redirect method="POST">${pollUrl}</Redirect></Response>`;
     }
 
-    // Response is ready — deliver it and clean up
-    this.logger.log(
-      `[handlePollWebhook] ✅ Response ready for callId=${callId}. Delivering TwiML.`,
-    );
     this.pendingResponses.delete(callId);
     return twiml;
   }
@@ -545,12 +618,7 @@ export class AiCallService {
     const aiCall = await this.aiCallRepository.findOne({
       where: { twilioCallSid: body.CallSid },
     });
-    if (!aiCall) {
-      this.logger.warn(
-        `Received status callback for unknown CallSid: ${body.CallSid}`,
-      );
-      return;
-    }
+    if (!aiCall) return;
 
     const statusMap: Record<string, CallStatus> = {
       initiated: CallStatus.INITIATED,

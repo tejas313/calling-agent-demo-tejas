@@ -1,34 +1,34 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { Patient } from './entities/patient.entity';
+import { PatientProfile } from '../entities';
 
 @Injectable()
 export class PatientsService {
   private readonly logger = new Logger(PatientsService.name);
 
   constructor(
-    @InjectRepository(Patient)
-    private readonly patientRepository: Repository<Patient>,
+    @InjectRepository(PatientProfile)
+    private readonly patientRepository: Repository<PatientProfile>,
   ) {}
 
-  async findAll(): Promise<Patient[]> {
+  async findAll(): Promise<PatientProfile[]> {
     return this.patientRepository.find();
   }
 
-  async findById(id: string): Promise<Patient> {
-    const patient = await this.patientRepository.findOne({ where: { id } as any });
+  async findById(id: string): Promise<PatientProfile> {
+    const patient = await this.patientRepository.findOne({ where: { id } });
     if (!patient) {
       throw new NotFoundException(`Patient with ID ${id} not found`);
     }
     return patient;
   }
 
-  async findByPhone(phone: string): Promise<Patient | null> {
+  async findByPhone(phone: string): Promise<PatientProfile | null> {
     const normalizedPhone = phone.replace(/\D/g, '');
     const patients = await this.patientRepository.find();
     return (
-      patients.find((p) => ((p as any).phone || '').replace(/\D/g, '') === normalizedPhone) || null
+      patients.find((p) => (p.phone || '').replace(/\D/g, '') === normalizedPhone) || null
     );
   }
 
@@ -40,13 +40,13 @@ export class PatientsService {
     try {
       const patient = await this.findById(patientId);
       const normalizedInput = phoneNumber.replace(/\D/g, '');
-      const normalizedStored = ((patient as any).phone || '').replace(/\D/g, '');
+      const normalizedStored = (patient.phone || '').replace(/\D/g, '');
 
       if (normalizedInput === normalizedStored) {
         return {
           verified: true,
-          patientId: (patient as any).id,
-          patientName: (patient as any).name,
+          patientId: patient.id,
+          patientName: `${patient.firstName} ${patient.lastName}`.trim(),
         };
       }
 

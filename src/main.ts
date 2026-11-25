@@ -44,7 +44,6 @@ async function bootstrap() {
     .setVersion('1.0.0')
     .addTag('AI Call', 'AI calling agent endpoints')
     .addTag('Patients', 'Patient management')
-    .addTag('Appointments', 'Appointment management')
     .addServer(`http://localhost:${process.env.PORT || 3000}`, 'Local Development')
     .build();
 

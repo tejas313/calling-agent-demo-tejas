@@ -1,9 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConfigModule, ConfigService } from '@nestjs/config';
-import { Patient } from '../patients/entities/patient.entity';
-import { Appointment } from '../appointments/entities/appointment.entity';
-import { AiCall } from '../ai-call/entities/ai-call.entity';
+import { ALL_ENTITIES } from '../entities';
 
 @Module({
   imports: [
@@ -12,8 +10,8 @@ import { AiCall } from '../ai-call/entities/ai-call.entity';
       useFactory: (configService: ConfigService) => ({
         type: 'postgres',
         url: configService.get<string>('DATABASE_URL'),
-        entities: [Patient, Appointment, AiCall],
-        synchronize: true,
+        entities: ALL_ENTITIES,
+        synchronize: configService.get<string>('DB_SYNCHRONIZE') === 'true',
         logging: false,
         ssl:
           configService.get<string>('NODE_ENV') === 'production'
