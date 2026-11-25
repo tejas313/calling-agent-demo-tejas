@@ -31,6 +31,14 @@ export class StartCallDto {
   @IsString()
   assigned_physician_id?: string;
 
+  @ApiPropertyOptional({
+    example: 'uuid-appointment-type-id',
+    description: 'Appointment type ID (matched against physician_patient_slots.physician_apt_type_id). Falls back to triage_assignments.appointment_type_id if omitted.',
+  })
+  @IsOptional()
+  @IsString()
+  appointment_type_id?: string;
+
   @ApiPropertyOptional({ example: 'en', description: 'Language code', enum: ['en', 'fr'] })
   @IsOptional()
   @IsString()

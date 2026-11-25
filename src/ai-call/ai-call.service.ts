@@ -129,17 +129,27 @@ export class AiCallService {
       ? baseDate.add(count, unit).format("YYYY-MM-DD")
       : baseDate.format("YYYY-MM-DD");
 
+    const appointmentTypeId = dto.appointment_type_id || assignment.appointmentTypeId;
+
     this.logger.log(
-      `[Slot Lookup] patientId=${dto.patientId}, clinicId=${dto.clinicId}, physicianId=${physicianId}, approvedDate=${baseDate.format("YYYY-MM-DD")}, scheduleCount=${count}, scheduleUnit=${assignment.scheduleUnit}, targetDate=${targetDate}`,
+      `[Slot Lookup] patientId=${dto.patientId}, clinicId=${dto.clinicId}, physicianId=${physicianId}, appointmentTypeId=${appointmentTypeId || "any"}, approvedDate=${baseDate.format("YYYY-MM-DD")}, scheduleCount=${count}, scheduleUnit=${assignment.scheduleUnit}, targetDate=${targetDate}`,
     );
 
     // 5. Fetch first available slot in physician_patient_slots with status = 1 and date >= targetDate
-    const availableSlot = await this.physicianPatientSlotRepository
+    const slotQuery = this.physicianPatientSlotRepository
       .createQueryBuilder("slot")
       .where("slot.clinic_id = :clinicId", { clinicId: dto.clinicId })
       .andWhere("slot.physician_profile_id = :physicianId", { physicianId })
       .andWhere("slot.status = :status", { status: 1 })
-      .andWhere("slot.date >= :targetDate", { targetDate })
+      .andWhere("slot.date >= :targetDate", { targetDate });
+
+    if (appointmentTypeId) {
+      slotQuery.andWhere("slot.physician_apt_type_id = :appointmentTypeId", {
+        appointmentTypeId,
+      });
+    }
+
+    const availableSlot = await slotQuery
       .orderBy("slot.date", "ASC")
       .addOrderBy("slot.startTime", "ASC")
       .getOne();
