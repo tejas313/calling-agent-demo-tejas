@@ -1,4 +1,5 @@
-import { AiCall, ConversationMessage } from './ai-call.entity';
+import { AiCall, ConversationMessage, PendingCallAction } from './ai-call.entity';
+import { AiCallLog, AiCallLogLevel } from './ai-call-log.entity';
 import { AppointmentType } from './appointment-type.entity';
 import { ClinicAdminClinic } from './clinic-admin-clinic.entity';
 import { ClinicAdminProfile } from './clinic-admin-profile.entity';
@@ -35,7 +36,10 @@ import { User } from './user.entity';
 
 export {
   AiCall,
+  AiCallLog,
+  AiCallLogLevel,
   ConversationMessage,
+  PendingCallAction,
   AppointmentType,
   ClinicAdminClinic,
   ClinicAdminProfile,
@@ -73,6 +77,7 @@ export {
 
 export const ALL_ENTITIES = [
   AiCall,
+  AiCallLog,
   AppointmentType,
   ClinicAdminClinic,
   ClinicAdminProfile,

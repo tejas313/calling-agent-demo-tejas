@@ -4,7 +4,11 @@ import {
   Column,
   CreateDateColumn,
   UpdateDateColumn,
+  ManyToOne,
+  JoinColumn,
 } from 'typeorm';
+import { Clinic } from './clinic.entity';
+import { User } from './user.entity';
 
 @Entity('physician_clinic_profiles')
 export class PhysicianClinicProfile {
@@ -32,6 +36,10 @@ export class PhysicianClinicProfile {
   @Column({ name: 'invited_by_user_id', type: 'uuid', nullable: true })
   invitedByUserId: string | null;
 
+  @ManyToOne(() => User, { onDelete: 'SET NULL', nullable: true })
+  @JoinColumn({ name: 'invited_by_user_id' })
+  invitedByUser: User | null;
+
   @Column({ type: 'timestamp', nullable: true })
   expiresAt: Date | null;
 
@@ -47,10 +55,17 @@ export class PhysicianClinicProfile {
   @Column({ name: 'user_id', type: 'uuid', nullable: true })
   userId: string | null;
 
+  @ManyToOne(() => User, { onDelete: 'CASCADE', nullable: true })
+  @JoinColumn({ name: 'user_id' })
+  user: User | null;
+
   @Column({ name: 'clinic_id', type: 'uuid' })
   clinicId: string;
+
+  @ManyToOne(() => Clinic, { onDelete: 'CASCADE' })
+  @JoinColumn({ name: 'clinic_id' })
+  clinic: Clinic;
 
   @Column({ type: 'integer', default: 1, nullable: true })
   languageType: number | null;
 }
-

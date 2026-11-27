@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import {
   AiCall,
+  AiCallLog,
   PatientAppointmentBooking,
   PatientProfile,
   PhysicianClinicProfile,
@@ -17,6 +18,7 @@ import { LangchainModule } from '../langchain/langchain.module';
   imports: [
     TypeOrmModule.forFeature([
       AiCall,
+      AiCallLog,
       PatientProfile,
       TriageAssignment,
       PhysicianClinicProfile,

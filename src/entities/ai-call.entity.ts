@@ -16,6 +16,8 @@ export interface ConversationMessage {
   toolOutput?: any;
 }
 
+export type PendingCallAction = 'CONFIRM' | 'CANCEL' | null;
+
 @Entity('ai_calls')
 export class AiCall {
   @PrimaryGeneratedColumn('uuid')
@@ -70,6 +72,15 @@ export class AiCall {
 
   @Column({ name: 'current_turn', default: 0 })
   currentTurn: number;
+
+  @Column({ name: 'pending_action', type: 'varchar', nullable: true })
+  pendingAction: PendingCallAction;
+
+  @Column({ name: 'call_reason', type: 'text', nullable: true })
+  callReason: string | null;
+
+  @Column({ name: 'last_error', type: 'text', nullable: true })
+  lastError: string | null;
 
   @Column({ name: 'started_at', nullable: true })
   startedAt: Date;

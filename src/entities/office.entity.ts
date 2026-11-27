@@ -4,7 +4,10 @@ import {
   Column,
   CreateDateColumn,
   UpdateDateColumn,
+  ManyToOne,
+  JoinColumn,
 } from 'typeorm';
+import { Clinic } from './clinic.entity';
 
 @Entity('offices')
 export class Office {
@@ -34,5 +37,8 @@ export class Office {
 
   @Column({ name: 'clinic_id', type: 'uuid', nullable: true })
   clinicId: string | null;
-}
 
+  @ManyToOne(() => Clinic, { onDelete: 'CASCADE', nullable: true })
+  @JoinColumn({ name: 'clinic_id' })
+  clinic: Clinic | null;
+}

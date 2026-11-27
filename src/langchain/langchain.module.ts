@@ -2,7 +2,10 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import {
   Clinic,
+  OfficeAvailability,
+  PhysicianAppointmentType,
   PhysicianClinicProfile,
+  PhysicianClinicSpecialty,
   PhysicianPatientSlot,
   TriageAssignment,
 } from '../entities';
@@ -17,6 +20,9 @@ import { LangsmithModule } from '../langsmith/langsmith.module';
       TriageAssignment,
       Clinic,
       PhysicianClinicProfile,
+      OfficeAvailability,
+      PhysicianAppointmentType,
+      PhysicianClinicSpecialty,
     ]),
     PatientsModule,
     LangsmithModule,

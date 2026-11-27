@@ -4,7 +4,11 @@ import {
   Column,
   CreateDateColumn,
   UpdateDateColumn,
+  ManyToOne,
+  JoinColumn,
 } from 'typeorm';
+import { User } from './user.entity';
+import { Clinic } from './clinic.entity';
 
 @Entity('patient_profiles')
 export class PatientProfile {
@@ -14,8 +18,16 @@ export class PatientProfile {
   @Column({ name: 'user_id', type: 'uuid' })
   userId: string;
 
+  @ManyToOne(() => User, { onDelete: 'CASCADE' })
+  @JoinColumn({ name: 'user_id' })
+  user: User;
+
   @Column({ name: 'clinic_id', type: 'uuid', nullable: true })
   clinicId: string | null;
+
+  @ManyToOne(() => Clinic, { onDelete: 'SET NULL', nullable: true })
+  @JoinColumn({ name: 'clinic_id' })
+  clinic: Clinic | null;
 
   @Column({ type: 'varchar' })
   firstName: string;
@@ -71,4 +83,3 @@ export class PatientProfile {
   @UpdateDateColumn({ type: 'timestamp' })
   updatedAt: Date;
 }
-

@@ -49,6 +49,12 @@ export class AiCallController {
     return this.aiCallService.getTranscript(id);
   }
 
+  @Get(':id/logs')
+  @ApiOperation({ summary: 'Get persistent call audit and error logs' })
+  async getLogs(@Param('id') id: string) {
+    return this.aiCallService.getLogs(id);
+  }
+
   @SkipThrottle()
   @Post('twilio/poll')
   @HttpCode(200)

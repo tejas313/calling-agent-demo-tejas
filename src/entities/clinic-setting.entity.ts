@@ -3,7 +3,10 @@ import {
   PrimaryGeneratedColumn,
   Column,
   UpdateDateColumn,
+  OneToOne,
+  JoinColumn,
 } from 'typeorm';
+import { Clinic } from './clinic.entity';
 
 @Entity('clinic_settings')
 export class ClinicSetting {
@@ -24,5 +27,8 @@ export class ClinicSetting {
 
   @Column({ name: 'clinic_id', type: 'uuid', unique: true, nullable: true })
   clinicId: string | null;
-}
 
+  @OneToOne(() => Clinic, { onDelete: 'CASCADE', nullable: true })
+  @JoinColumn({ name: 'clinic_id' })
+  clinic: Clinic | null;
+}

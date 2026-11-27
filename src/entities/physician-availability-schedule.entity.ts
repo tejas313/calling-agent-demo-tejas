@@ -4,7 +4,11 @@ import {
   Column,
   CreateDateColumn,
   UpdateDateColumn,
+  ManyToOne,
+  JoinColumn,
 } from 'typeorm';
+import { PhysicianClinicProfile } from './physician-clinic-profile.entity';
+import { Office } from './office.entity';
 
 @Entity('physician_availability_schedules')
 export class PhysicianAvailabilitySchedule {
@@ -32,7 +36,14 @@ export class PhysicianAvailabilitySchedule {
   @Column({ name: 'physician_profile_id', type: 'uuid', nullable: true })
   physicianProfileId: string | null;
 
+  @ManyToOne(() => PhysicianClinicProfile, { onDelete: 'CASCADE', nullable: true })
+  @JoinColumn({ name: 'physician_profile_id' })
+  physicianProfile: PhysicianClinicProfile | null;
+
   @Column({ name: 'office_id', type: 'uuid', nullable: true })
   officeId: string | null;
-}
 
+  @ManyToOne(() => Office, { nullable: true })
+  @JoinColumn({ name: 'office_id' })
+  office: Office | null;
+}

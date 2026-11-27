@@ -11,7 +11,7 @@ import { ALL_ENTITIES } from '../entities';
         type: 'postgres',
         url: configService.get<string>('DATABASE_URL'),
         entities: ALL_ENTITIES,
-        synchronize: configService.get<string>('DB_SYNCHRONIZE') === 'true',
+        synchronize: true,
         logging: false,
         ssl:
           configService.get<string>('NODE_ENV') === 'production'

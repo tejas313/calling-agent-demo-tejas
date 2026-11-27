@@ -5,7 +5,11 @@ import {
   CreateDateColumn,
   UpdateDateColumn,
   Unique,
+  ManyToOne,
+  JoinColumn,
 } from 'typeorm';
+import { PhysicianClinicProfile } from './physician-clinic-profile.entity';
+import { Clinic } from './clinic.entity';
 
 @Entity('physician_virtual_slots')
 @Unique('IDX_phys_virtual_slot_uniq', ['physicianProfileId', 'clinicId', 'date', 'startTime'])
@@ -16,8 +20,16 @@ export class PhysicianVirtualSlot {
   @Column({ name: 'physician_profile_id', type: 'uuid' })
   physicianProfileId: string;
 
+  @ManyToOne(() => PhysicianClinicProfile, { onDelete: 'CASCADE' })
+  @JoinColumn({ name: 'physician_profile_id' })
+  physicianProfile: PhysicianClinicProfile;
+
   @Column({ name: 'clinic_id', type: 'uuid' })
   clinicId: string;
+
+  @ManyToOne(() => Clinic, { onDelete: 'CASCADE' })
+  @JoinColumn({ name: 'clinic_id' })
+  clinic: Clinic;
 
   @Column({ type: 'varchar', length: 10 })
   date: string;
@@ -40,4 +52,3 @@ export class PhysicianVirtualSlot {
   @UpdateDateColumn({ type: 'timestamp' })
   updatedAt: Date;
 }
-

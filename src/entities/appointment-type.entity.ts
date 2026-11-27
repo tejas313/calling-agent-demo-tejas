@@ -4,7 +4,10 @@ import {
   Column,
   CreateDateColumn,
   UpdateDateColumn,
+  ManyToOne,
+  JoinColumn,
 } from 'typeorm';
+import { Clinic } from './clinic.entity';
 
 @Entity('appointment_types')
 export class AppointmentType {
@@ -34,5 +37,8 @@ export class AppointmentType {
 
   @Column({ name: 'clinic_id', type: 'uuid', nullable: true })
   clinicId: string | null;
-}
 
+  @ManyToOne(() => Clinic, { nullable: true })
+  @JoinColumn({ name: 'clinic_id' })
+  clinic: Clinic | null;
+}
