@@ -60,6 +60,8 @@ export interface AgentRunResult {
   intentPath: 'FAST_PATH' | 'LLM';
   updatedHistory: BaseMessage[];
   toolsUsed: string[];
+  normalizedUserMessage?: string;
+  sttHints?: string[];
   llmError?: string;
 }
 
@@ -357,6 +359,11 @@ export class AgentService {
       const isFrench = params.language === 'fr';
       const ctx = await this.getOrLoadContext(params);
       const appointmentDate = this.formatSlotForLanguage(ctx, params.language);
+      const sttHints = [
+        ctx.clinicName,
+        ctx.physicianName ? (isFrench ? `Docteur ${ctx.physicianName}` : `Doctor ${ctx.physicianName}`) : '',
+        ctx.physicianName,
+      ].filter(Boolean);
 
       this.logger.log(
         `[runAgentTurn] 💾 DB Context: Patient="${ctx.patientName}", Clinic="${ctx.clinicName}", Physician="${ctx.physicianName}", Slot="${appointmentDate}", pendingAction=${params.pendingAction ?? 'none'}`,
@@ -372,14 +379,25 @@ export class AgentService {
           actionResult: null,
           nextPendingAction: null,
           intentPath: 'FAST_PATH',
+          sttHints,
           updatedHistory: [...params.conversationHistory, new AIMessage(greeting)],
           toolsUsed: [],
         };
       }
 
+      const normalizedUserMessage = this.normalizeTelephonyStt(
+        params.userMessage,
+        params.pendingAction ?? null,
+      );
+      if (normalizedUserMessage !== params.userMessage) {
+        this.logger.log(
+          `[runAgentTurn] 🔧 STT normalized: "${params.userMessage}" -> "${normalizedUserMessage}"`,
+        );
+      }
+
       // Fast deterministic path for direct confirm / cancel / yes / no utterances
       const fastDecision = this.tryFastStateTransition(
-        params.userMessage,
+        normalizedUserMessage,
         params.pendingAction ?? null,
         ctx,
         appointmentDate,
@@ -392,9 +410,11 @@ export class AgentService {
         return {
           ...fastDecision,
           intentPath: 'FAST_PATH',
+          normalizedUserMessage,
+          sttHints,
           updatedHistory: [
             ...params.conversationHistory,
-            new HumanMessage(params.userMessage),
+            new HumanMessage(normalizedUserMessage),
             new AIMessage(fastDecision.response),
           ],
           toolsUsed: [],
@@ -409,7 +429,7 @@ export class AgentService {
       const messages = [
         new SystemMessage(systemPrompt),
         ...params.conversationHistory,
-        new HumanMessage(params.userMessage),
+        new HumanMessage(normalizedUserMessage),
       ];
 
       let responseText = '';
@@ -456,10 +476,12 @@ export class AgentService {
       return {
         ...resolved,
         intentPath: 'LLM',
+        normalizedUserMessage,
+        sttHints,
         llmError,
         updatedHistory: [
           ...params.conversationHistory,
-          new HumanMessage(params.userMessage),
+          new HumanMessage(normalizedUserMessage),
           new AIMessage(resolved.response),
         ],
         toolsUsed: [],
@@ -541,7 +563,76 @@ export class AgentService {
       : `Okay, your appointment for ${slotText} has been cancelled. Please contact ${clinic} if you need further help. Goodbye!`;
   }
 
-  private classifyFastIntent(text: string): FastIntent {
+  /**
+   * Repairs common 8kHz telephony STT homophone misrecognitions
+   * (e.g. "Yes, please contact." -> "Yes, please confirm.") when the utterance
+   * is a short command without question or clinic/doctor contact-info keywords.
+   */
+  private normalizeTelephonyStt(
+    text: string,
+    pendingAction: PendingCallAction,
+  ): string {
+    if (!text) return text;
+    const lower = text.toLowerCase().trim();
+    const wordCount = lower.replace(/[.,!?]/g, ' ').trim().split(/\s+/).filter(Boolean).length;
+    if (wordCount === 0 || wordCount > 7) {
+      return text;
+    }
+
+    const questionOrInfoTerms = [
+      '?',
+      'what',
+      'where',
+      'when',
+      'who',
+      'which',
+      'how',
+      'why',
+      'clinic',
+      'office',
+      'doctor',
+      'physician',
+      'number',
+      'phone',
+      'email',
+      'address',
+      'reach',
+      'details',
+      'info',
+      'quel',
+      'quelle',
+      'où',
+      'quand',
+      'comment',
+      'clinique',
+      'médecin',
+    ];
+    if (questionOrInfoTerms.some((term) => lower.includes(term))) {
+      return text;
+    }
+
+    let repaired = text;
+
+    // Common STT substitutions for "confirm" on narrowband phone audio
+    const confirmHomophoneRegex = /\b(contact|confer|conform|conformed|conforming|corn firm|come firm|confim)\b/gi;
+    const hasConfirmContext =
+      pendingAction === 'CONFIRM' ||
+      /\b(yes|yeah|yep|please|appointment|it)\b/i.test(lower) ||
+      wordCount <= 2;
+    if (hasConfirmContext && confirmHomophoneRegex.test(repaired)) {
+      repaired = repaired.replace(confirmHomophoneRegex, 'confirm');
+    }
+
+    // Common STT substitutions for "cancel"
+    const cancelHomophoneRegex = /\b(counsel|council|cansel|pencil)\b/gi;
+    if (cancelHomophoneRegex.test(repaired)) {
+      repaired = repaired.replace(cancelHomophoneRegex, 'cancel');
+    }
+
+    return repaired;
+  }
+
+  private classifyFastIntent(text: string, pendingAction: PendingCallAction): FastIntent {
     const normalized = text
       .toLowerCase()
       .replace(/[’']/g, "'")
@@ -613,10 +704,19 @@ export class AgentService {
     if (hasConfirm) return 'CONFIRM';
 
     const isYes =
-      /^(yes|yeah|yep|yup|sure|ok|okay|please|go ahead|of course|definitely|absolutely|correct|right|i am sure|yes please|yes i am|oui|ouais|d'accord|daccord|bien sûr|parfait|volontiers)(\s+(please|sure|s'il vous plaît|merci))?$/.test(
+      /^(yes|yeah|yep|yup|sure|ok|okay|please|go ahead|of course|definitely|absolutely|correct|right|i am sure|yes please|yes i am|oui|ouais|d'accord|daccord|bien sûr|parfait|volontiers)(\s+(please|sure|i am|it|that|s'il vous plaît|merci))?$/.test(
         normalized,
       );
     if (isYes) return 'YES';
+
+    // During pending double-confirmation, any short affirmative opening without a negation is YES
+    if (
+      pendingAction !== null &&
+      /^(yes|yeah|yep|sure|ok|okay|oui|d'accord|daccord)\b/.test(normalized) &&
+      !/\b(no|not|don't|do not|wait|non|pas)\b/.test(normalized)
+    ) {
+      return 'YES';
+    }
 
     const isNo =
       /^(no|nope|nah|not sure|not yet|not really|no wait|no thanks|no thank you|wait|hold on|never mind|nevermind|don't|do not|non|non merci|pas encore|attendez|pas sûr)(\s+(please|thanks|thank you|wait|s'il vous plaît|merci))?$/.test(
@@ -634,7 +734,7 @@ export class AgentService {
     appointmentDate: string,
     isFrench: boolean,
   ): Omit<AgentRunResult, 'intentPath' | 'updatedHistory' | 'toolsUsed'> | null {
-    const intent = this.classifyFastIntent(userMessage);
+    const intent = this.classifyFastIntent(userMessage, pendingAction);
     if (!intent) return null;
 
     if (pendingAction === 'CONFIRM') {

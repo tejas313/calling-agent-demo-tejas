@@ -212,6 +212,42 @@ describe('AgentService & System Prompt', () => {
     expect(res.response.toLowerCase()).toContain('are you sure');
   });
 
+  it('repairs STT homophone "Yes, please contact." -> confirm via FAST_PATH without breaking clinic contact questions', async () => {
+    const step1 = await service.runAgentTurn({
+      ...baseParams,
+      userMessage: 'Please contact.',
+      pendingAction: null,
+    });
+    expect(step1.intentPath).toBe('FAST_PATH');
+    expect(step1.normalizedUserMessage).toBe('Please confirm.');
+    expect(step1.nextPendingAction).toBe('CONFIRM');
+    expect(step1.isComplete).toBe(false);
+
+    const step2 = await service.runAgentTurn({
+      ...baseParams,
+      userMessage: 'Yes, please contact.',
+      pendingAction: 'CONFIRM',
+    });
+    expect(step2.intentPath).toBe('FAST_PATH');
+    expect(step2.normalizedUserMessage).toBe('Yes, please confirm.');
+    expect(step2.actionResult).toBe('CONFIRMED');
+    expect(step2.isComplete).toBe(true);
+
+    // Genuine clinic contact question must NOT be rewritten as confirm
+    const invokeMock = jest.fn().mockResolvedValue({
+      content: 'You can reach Hope One Clinic at +14165550100.',
+    });
+    jest.spyOn(service as any, 'createModel').mockReturnValue({ invoke: invokeMock });
+    const qRes = await service.runAgentTurn({
+      ...baseParams,
+      userMessage: 'How do I contact the clinic?',
+      pendingAction: null,
+    });
+    expect(qRes.intentPath).toBe('LLM');
+    expect(qRes.normalizedUserMessage).toBe('How do I contact the clinic?');
+    expect(qRes.nextPendingAction).toBeNull();
+  });
+
   it('builds English and French prompts with strict scope guardrails and all 4 DB sections', () => {
     const enPrompt = buildSystemPrompt({
       language: 'en',

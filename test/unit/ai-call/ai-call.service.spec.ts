@@ -107,11 +107,10 @@ describe('AiCallService', () => {
     );
   });
 
-  it('blocks startCall and stores CALL_BLOCKED log when approvedDate is earlier than today', async () => {
-    const yesterday = dayjs().subtract(1, 'day').toDate();
+  it('blocks startCall and stores CALL_BLOCKED log when approvedDate is missing on triage assignment', async () => {
     assignmentRepo.findOne.mockResolvedValue({
       id: 'assign-1',
-      approvedDate: yesterday,
+      approvedDate: null,
       scheduleCount: 1,
       scheduleUnit: 1,
       assignedPhysicianId: 'phys-1',
@@ -122,9 +121,41 @@ describe('AiCallService', () => {
       expect.objectContaining({
         eventType: 'CALL_BLOCKED',
         level: 'WARN',
+        message: expect.stringContaining('does not have an approvedDate'),
       }),
     );
     expect(aiCallRepo.save).not.toHaveBeenCalled();
+  });
+
+  it('allows startCall even when approvedDate is earlier than today and forces minSlotDate to tomorrow', async () => {
+    const pastDate = dayjs().subtract(5, 'day').toDate();
+    const tomorrowStr = dayjs().add(1, 'day').format('YYYY-MM-DD');
+
+    assignmentRepo.findOne.mockResolvedValue({
+      id: 'assign-1',
+      approvedDate: pastDate,
+      scheduleCount: 1,
+      scheduleUnit: 1,
+      assignedPhysicianId: 'phys-1',
+    });
+
+    slotRepo._qb.getMany.mockResolvedValue([
+      { id: 'slot-future', date: tomorrowStr, startTime: '10:00 AM', endTime: '10:30 AM', status: 1 },
+    ]);
+
+    const res = await service.startCall({ ...baseDto });
+
+    expect(res.success).toBe(true);
+    expect(res.slot?.id).toBe('slot-future');
+    expect(slotRepo._qb.andWhere).toHaveBeenCalledWith('slot.date >= :minSlotDate', {
+      minSlotDate: tomorrowStr,
+    });
+    expect(aiCallLogRepo.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: 'CALL_INITIATED',
+        level: 'INFO',
+      }),
+    );
   });
 
   it('selects earliest chronological slot strictly after today and logs CALL_INITIATED with callReason', async () => {

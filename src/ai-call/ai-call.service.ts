@@ -178,16 +178,9 @@ export class AiCallService {
       throw new NotFoundException(msg);
     }
 
-    // 2. Enforce approvedDate >= today
-    const todayStr = dayjs().format('YYYY-MM-DD');
-    const approvedDateStr = assignment.approvedDate
-      ? dayjs(assignment.approvedDate).format('YYYY-MM-DD')
-      : null;
-
-    if (!approvedDateStr || approvedDateStr < todayStr) {
-      const msg = !approvedDateStr
-        ? `Call skipped: triage assignment ${dto.assignmentsId} does not have an approvedDate.`
-        : `Call skipped: triage assignment ${dto.assignmentsId} has approvedDate=${approvedDateStr}, which is earlier than today (${todayStr}). Twilio calls are only placed when approvedDate is today or greater.`;
+    // 2. Validate that approvedDate is present on triage assignment
+    if (!assignment.approvedDate) {
+      const msg = `Call skipped: triage assignment ${dto.assignmentsId} does not have an approvedDate.`;
       this.logger.warn(`[startCall] ${msg}`);
       await this.logCallEvent({
         patientId: dto.patientId,
@@ -195,10 +188,13 @@ export class AiCallService {
         eventType: 'CALL_BLOCKED',
         level: 'WARN',
         message: msg,
-        details: { approvedDate: approvedDateStr, today: todayStr, clinicId: dto.clinicId },
+        details: { clinicId: dto.clinicId },
       });
       throw new BadRequestException(msg);
     }
+
+    const baseDate = dayjs(assignment.approvedDate);
+    const approvedDateStr = baseDate.format('YYYY-MM-DD');
 
     // 3. Determine and verify physician in physician_clinic_profiles
     const physicianId = dto.assigned_physician_id || assignment.assignedPhysicianId;
@@ -231,7 +227,6 @@ export class AiCallService {
 
     // 4. Calculate minimum eligible slot date:
     //    max(approvedDate + scheduleCount * scheduleUnit, tomorrow) so slot is strictly AFTER today
-    const baseDate = dayjs(assignment.approvedDate);
     const count = assignment.scheduleCount || 0;
     const unitMap: Record<number, 'day' | 'week' | 'month'> = {
       1: 'day',
@@ -584,10 +579,11 @@ export class AiCallService {
     let detectedLanguage = aiCall.language || 'en';
     let userIntent = '';
 
-    const isGreetingWord = [
-      'hello', 'hi', 'hey', 'yes', 'yeah', 'yep', 'sure', 'okay', 'ok',
-      'bonjour', 'allô', 'allo', 'oui',
-    ].includes(speechLower.replace(/[?.!,]/g, '').trim());
+    const cleanedGreeting = speechLower.replace(/[?.!,]/g, '').trim();
+    const isEnGreetingWord = ['hello', 'hi', 'hey', 'yes', 'yeah', 'yep', 'sure', 'okay', 'ok'].includes(
+      cleanedGreeting,
+    );
+    const isFrGreetingWord = ['bonjour', 'allô', 'allo', 'oui', 'salut'].includes(cleanedGreeting);
 
     if (defaultLang === 'en') {
       detectedLanguage = 'en';
@@ -608,10 +604,11 @@ export class AiCallService {
         speechLower === 'français' ||
         speechLower === 'francais' ||
         speechLower === 'deux' ||
-        speechLower === 'two')
+        speechLower === 'two' ||
+        isFrGreetingWord)
     ) {
       detectedLanguage = 'fr';
-    } else if (aiCall.currentTurn === 2 && isGreetingWord) {
+    } else if (aiCall.currentTurn === 2 && isEnGreetingWord) {
       detectedLanguage = 'en';
     } else if (this.isLikelyFrench(speechLower)) {
       detectedLanguage = 'fr';
@@ -811,6 +808,7 @@ export class AiCallService {
           responseTextToSpeak,
           actionUrl,
           aiCall.language,
+          result.sttHints,
         );
       }
 
@@ -834,6 +832,10 @@ export class AiCallService {
         details: {
           turn: aiCall.currentTurn,
           userMessage,
+          normalizedUserMessage:
+            result.normalizedUserMessage && result.normalizedUserMessage !== userMessage
+              ? result.normalizedUserMessage
+              : undefined,
           response: responseTextToSpeak,
           intentPath: result.intentPath,
           pendingAction: aiCall.pendingAction,

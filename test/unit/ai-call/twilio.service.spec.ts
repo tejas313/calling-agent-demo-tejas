@@ -14,25 +14,29 @@ describe('TwilioService', () => {
     return new TwilioService(configService);
   };
 
-  it('uses speechTimeout="1" and natural 88% prosody rate for language selection', () => {
+  it('uses speechTimeout="1" and natural 93% prosody rate for language selection', () => {
     const service = makeService();
     const twiml = service.generateLanguageSelectionTwiML('https://example.com/voice?callId=123');
 
     expect(twiml).toContain('speechTimeout="1"');
     expect(twiml).toContain('speechModel="phone_call"');
     expect(twiml).toContain('enhanced="true"');
-    expect(twiml).toContain('<prosody rate="88%">');
+    expect(twiml).toContain('<prosody rate="93%">');
   });
 
-  it('uses speechTimeout="1" and configured TTS_SPEECH_RATE in Gather TwiML', () => {
+  it('uses speechTimeout="1", phrase hints, extraHints, and configured TTS_SPEECH_RATE in Gather TwiML', () => {
     const service = makeService('85%');
     const twiml = service.generateGatherTwiML(
       'Hello! Would you like to confirm?',
       'https://example.com/voice?callId=123',
       'en',
+      ['Hope One Clinic', 'Doctor Vikram Makhija'],
     );
 
     expect(twiml).toContain('speechTimeout="1"');
+    expect(twiml).toContain('yes please confirm');
+    expect(twiml).toContain('Hope One Clinic');
+    expect(twiml).toContain('Doctor Vikram Makhija');
     expect(twiml).toContain('<prosody rate="85%">');
     expect(twiml).toContain('<break time="220ms"/>');
   });

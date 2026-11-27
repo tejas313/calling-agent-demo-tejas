@@ -23,7 +23,7 @@ export class TwilioService {
     const twilioFactory = (twilio as any).default || twilio;
     this.client = twilioFactory(accountSid, authToken);
     const configuredRate = this.configService.get<string>("TTS_SPEECH_RATE")?.trim();
-    this.speechRate = configuredRate || "88%";
+    this.speechRate = configuredRate || "93%";
   }
 
   /**
@@ -93,7 +93,7 @@ export class TwilioService {
     const separator = actionUrl.includes("?") ? "&amp;" : "?";
     const fallbackRedirectUrl = `${actionUrl}${separator}defaultLang=en`;
     const enPrompt = this.formatSayBody(
-      "For English, press 1 or say English. For French, press 2 or say French.",
+      "For English, press 1 or say English.",
       "en",
     );
     const frPrompt = this.formatSayBody(
@@ -107,7 +107,7 @@ export class TwilioService {
 
     return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Gather input="speech dtmf" numDigits="1" action="${actionUrl}" method="POST" language="en-US" speechModel="phone_call" enhanced="true" bargeIn="false" speechTimeout="1" timeout="6" hints="English, French, Français, one, two, un, deux">
+  <Gather input="speech dtmf" numDigits="1" action="${actionUrl}" method="POST" language="en-US" speechModel="phone_call" enhanced="true" bargeIn="true" speechTimeout="1" timeout="6" hints="English, French, Français, press one, press two, one, two, un, deux">
     <Say voice="Polly.Danielle-Neural" language="en-US">${enPrompt}</Say>
     <Say voice="Polly.Lea-Neural" language="fr-FR">${frPrompt}</Say>
   </Gather>
@@ -119,21 +119,77 @@ export class TwilioService {
   /**
    * Generates multi-turn conversational TwiML.
    *
-   * Architecture: Seamless Gather with nested <Say>, natural SSML pacing, and fast 1s end-of-speech cutoff.
+   * Architecture: Seamless Gather with nested <Say>, natural SSML pacing,
+   * phrase-level STT hints, and 1s end-of-speech cutoff.
    */
   public generateGatherTwiML(
     text: string,
     actionUrl: string,
     language?: string,
+    extraHints?: string[],
   ): string {
     const isFrench = language === "fr";
     const lang = isFrench ? "fr-FR" : "en-US";
     const voice = isFrench ? "Polly.Lea-Neural" : "Polly.Danielle-Neural";
-    const speechModel = "phone_call";
+    const speechModel = isFrench ? "default" : "phone_call";
 
-    const hints = isFrench
-      ? "confirmer, annuler, oui, non, francais, Docteur, rendez-vous, clinique, patient, matin, apres-midi, lundi, mardi, mercredi, jeudi, vendredi, samedi, dimanche, merci, au revoir, un, deux, trois"
-      : "confirm, cancel, yes, no, English, Doctor, appointment, clinic, patient, morning, afternoon, Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, Sunday, thank you, goodbye, one, two, three";
+    const baseHints = isFrench
+      ? [
+          "oui je confirme",
+          "je confirme",
+          "confirmer le rendez-vous",
+          "oui confirmer",
+          "veuillez confirmer",
+          "confirmer",
+          "oui annuler",
+          "annuler le rendez-vous",
+          "je veux annuler",
+          "annuler",
+          "oui bien sûr",
+          "oui merci",
+          "non merci",
+          "adresse de la clinique",
+          "téléphone de la clinique",
+          "nom du médecin",
+          "spécialité du médecin",
+          "Docteur",
+          "rendez-vous",
+        ]
+      : [
+          "yes please confirm",
+          "please confirm",
+          "confirm my appointment",
+          "confirm appointment",
+          "yes confirm",
+          "confirm it",
+          "yes I confirm",
+          "confirm",
+          "yes book it",
+          "book appointment",
+          "yes please cancel",
+          "please cancel",
+          "cancel my appointment",
+          "cancel appointment",
+          "yes cancel",
+          "cancel it",
+          "cancel",
+          "yes sure",
+          "yes I am sure",
+          "yes please",
+          "no thank you",
+          "clinic address",
+          "clinic phone",
+          "clinic email",
+          "doctor name",
+          "doctor specialty",
+          "patient details",
+          "appointment time",
+        ];
+
+    const sanitizedExtra = (extraHints || [])
+      .map((h) => h.replace(/[<>&"']/g, " ").trim())
+      .filter(Boolean);
+    const hints = [...baseHints, ...sanitizedExtra].join(", ");
 
     const fallbackNoInput = isFrench
       ? "Je n'ai pas entendu de réponse. Au revoir."
@@ -142,9 +198,11 @@ export class TwilioService {
     const sayBody = this.formatSayBody(text, language);
     const fallbackBody = this.formatSayBody(fallbackNoInput, language);
 
+    const enhancedAttr = speechModel === "phone_call" ? ' enhanced="true"' : "";
+
     return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Gather input="speech dtmf" action="${actionUrl}" method="POST" language="${lang}" speechModel="${speechModel}" enhanced="true" speechTimeout="1" timeout="8" profanityFilter="false" bargeIn="false" hints="${hints}">
+  <Gather input="speech dtmf" action="${actionUrl}" method="POST" language="${lang}" speechModel="${speechModel}"${enhancedAttr} speechTimeout="1" timeout="8" profanityFilter="false" bargeIn="false" hints="${hints}">
     <Say voice="${voice}" language="${lang}">${sayBody}</Say>
   </Gather>
   <Say voice="${voice}" language="${lang}">${fallbackBody}</Say>
