@@ -1,8 +1,9 @@
-import { Controller, Post, Get, Body, Param, Query, Res, HttpCode, Logger } from '@nestjs/common';
+import { Controller, Post, Get, Body, Param, Query, Res, Req, HttpCode, Logger } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBody } from '@nestjs/swagger';
-import { Response } from 'express';
+import { Request, Response } from 'express';
 import { Throttle, SkipThrottle } from '@nestjs/throttler';
 import { AiCallService } from './ai-call.service';
+import { ResponseService } from '../common/response.service';
 import { StartCallDto } from './dto/start-call.dto';
 import { TwilioVoiceDto } from './dto/twilio-voice.dto';
 import { TwilioStatusDto } from './dto/twilio-status.dto';
@@ -12,9 +13,13 @@ import { TwilioStatusDto } from './dto/twilio-status.dto';
 export class AiCallController {
   private readonly logger = new Logger(AiCallController.name);
 
-  constructor(private readonly aiCallService: AiCallService) {}
+  constructor(
+    private readonly aiCallService: AiCallService,
+    private readonly responseService: ResponseService,
+  ) {}
 
   @Post('start')
+  @HttpCode(200)
   @Throttle({ default: { limit: 10, ttl: 60000 } })
   @ApiOperation({
     summary: 'Start an AI outbound call',
@@ -23,7 +28,7 @@ export class AiCallController {
   })
   @ApiBody({ type: StartCallDto })
   @ApiResponse({
-    status: 201,
+    status: 200,
     description: 'Call initiated successfully',
     schema: {
       example: { success: true, callId: 'uuid', twilioCallSid: 'CAxxxxx', status: 'initiated' },
@@ -31,28 +36,68 @@ export class AiCallController {
   })
   @ApiResponse({ status: 400, description: 'Invalid request' })
   @ApiResponse({ status: 429, description: 'Rate limit exceeded' })
-  async startCall(@Body() dto: StartCallDto) {
-    return this.aiCallService.startCall(dto);
+  async startCall(
+    @Body() dto: StartCallDto,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    try {
+      const result = await this.aiCallService.startCall(dto);
+      return this.responseService.success(res, 'CALL_INITIATED_SUCCESSFULLY', result);
+    } catch (error: any) {
+      const statusCode = error?.status || (error?.getStatus ? error.getStatus() : 500);
+      return this.responseService.error(req, res, error?.message || 'FAILED_TO_START_CALL', statusCode);
+    }
   }
 
   @Get(':id')
   @ApiOperation({ summary: 'Get AI call record' })
   @ApiResponse({ status: 200, description: 'Call record' })
   @ApiResponse({ status: 404, description: 'Call not found' })
-  async getCall(@Param('id') id: string) {
-    return this.aiCallService.getCall(id);
+  async getCall(
+    @Param('id') id: string,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    try {
+      const result = await this.aiCallService.getCall(id);
+      return this.responseService.success(res, 'CALL_RECORD_RETRIEVED_SUCCESSFULLY', result);
+    } catch (error: any) {
+      const statusCode = error?.status || (error?.getStatus ? error.getStatus() : 500);
+      return this.responseService.error(req, res, error?.message || 'CALL_NOT_FOUND', statusCode);
+    }
   }
 
   @Get(':id/transcript')
   @ApiOperation({ summary: 'Get call transcript' })
-  async getTranscript(@Param('id') id: string) {
-    return this.aiCallService.getTranscript(id);
+  async getTranscript(
+    @Param('id') id: string,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    try {
+      const result = await this.aiCallService.getTranscript(id);
+      return this.responseService.success(res, 'TRANSCRIPT_RETRIEVED_SUCCESSFULLY', result);
+    } catch (error: any) {
+      const statusCode = error?.status || (error?.getStatus ? error.getStatus() : 500);
+      return this.responseService.error(req, res, error?.message || 'FAILED_TO_GET_TRANSCRIPT', statusCode);
+    }
   }
 
   @Get(':id/logs')
   @ApiOperation({ summary: 'Get persistent call audit and error logs' })
-  async getLogs(@Param('id') id: string) {
-    return this.aiCallService.getLogs(id);
+  async getLogs(
+    @Param('id') id: string,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    try {
+      const result = await this.aiCallService.getLogs(id);
+      return this.responseService.success(res, 'LOGS_RETRIEVED_SUCCESSFULLY', result);
+    } catch (error: any) {
+      const statusCode = error?.status || (error?.getStatus ? error.getStatus() : 500);
+      return this.responseService.error(req, res, error?.message || 'FAILED_TO_GET_LOGS', statusCode);
+    }
   }
 
   @SkipThrottle()
@@ -86,36 +131,37 @@ export class AiCallController {
     @Body() body: TwilioVoiceDto,
     @Res() res: Response,
   ) {
-    // Defensive sanitization: extract clean UUID in case query strings were chained or malformed
-    const callId = rawCallId ? rawCallId.split('?')[0].split('&')[0].trim() : '';
-
-    if (body?.SpeechResult) {
-      this.logger.log(`\n==================================================\n🎤 [CALLER SPOKE]\n🗣️ Text: "${body.SpeechResult}"\n📊 Confidence: ${body.Confidence || 'N/A'}\n🆔 CallId: ${callId}\n==================================================`);
-    } else if (body?.Digits) {
-      this.logger.log(`\n==================================================\n🔢 [CALLER PRESSED KEYPAD]\n🔘 Digits: "${body.Digits}"\n🆔 CallId: ${callId}\n==================================================`);
-    } else {
-      this.logger.log(`[WEBHOOK] Call connected / Turn initiated — CallSid=${body?.CallSid}, CallId=${callId}`);
-    }
-
-    if (!callId) {
-      this.logger.error('[WEBHOOK] ❌ No callId in query params — Twilio webhook URL is misconfigured!');
-      const twiml = '<Response><Say>Invalid call configuration.</Say><Hangup/></Response>';
-      res.setHeader('Content-Type', 'text/xml');
-      return res.send(twiml);
-    }
-
     try {
+      // Defensive sanitization: extract clean UUID in case query strings were chained or malformed
+      const callId = rawCallId ? rawCallId.split('?')[0].split('&')[0].trim() : '';
+
+      if (body?.SpeechResult) {
+        this.logger.log(`\n==================================================\n🎤 [CALLER SPOKE]\n🗣️ Text: "${body.SpeechResult}"\n📊 Confidence: ${body.Confidence || 'N/A'}\n🆔 CallId: ${callId}\n==================================================`);
+      } else if (body?.Digits) {
+        this.logger.log(`\n==================================================\n🔢 [CALLER PRESSED KEYPAD]\n🔘 Digits: "${body.Digits}"\n🆔 CallId: ${callId}\n==================================================`);
+      } else {
+        this.logger.log(`[WEBHOOK] Call connected / Turn initiated — CallSid=${body?.CallSid}, CallId=${callId}`);
+      }
+
+      if (!callId) {
+        this.logger.error('[WEBHOOK] ❌ No callId in query params — Twilio webhook URL is misconfigured!');
+        const twiml = '<Response><Say>Invalid call configuration.</Say><Hangup/></Response>';
+        res.setHeader('Content-Type', 'text/xml');
+        return res.send(twiml);
+      }
+
       const twiml = await this.aiCallService.handleVoiceWebhook(
         callId,
-        body.SpeechResult,
-        body.CallSid || '',
-        body.Digits,
-        body.Confidence,
+        body?.SpeechResult,
+        body?.CallSid || '',
+        body?.Digits,
+        body?.Confidence,
         defaultLang,
       );
       res.setHeader('Content-Type', 'text/xml');
       return res.send(twiml);
     } catch (error: any) {
+      const callId = rawCallId ? rawCallId.split('?')[0].split('&')[0].trim() : '';
       this.logger.error(`[WEBHOOK] ❌ FATAL ERROR in handleVoiceWebhook for callId=${callId}: ${error?.message}`, error?.stack);
       const fallbackTwiml =
         '<Response><Say voice="Polly.Danielle-Neural" language="en-US">We are experiencing technical difficulties. Please call the clinic directly. Goodbye.</Say><Hangup/></Response>';
@@ -128,17 +174,37 @@ export class AiCallController {
   @Post('twilio/status')
   @HttpCode(200)
   @ApiOperation({ summary: 'Twilio status callback' })
-  async handleStatusCallback(@Body() body: TwilioStatusDto) {
-    await this.aiCallService.handleStatusCallback(body);
-    return { received: true };
+  async handleStatusCallback(
+    @Body() body: TwilioStatusDto,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    try {
+      await this.aiCallService.handleStatusCallback(body);
+      return this.responseService.success(res, 'WEBHOOK_PROCESSED_SUCCESSFULLY', { received: true });
+    } catch (error: any) {
+      this.logger.error(`[STATUS_CALLBACK] ❌ Error: ${error?.message}`, error?.stack);
+      const statusCode = error?.status || (error?.getStatus ? error.getStatus() : 500);
+      return this.responseService.error(req, res, error?.message || 'SOMETHING_WENT_WRONG', statusCode);
+    }
   }
 
   @SkipThrottle()
   @Post('twilio/recording')
   @HttpCode(200)
   @ApiOperation({ summary: 'Twilio recording callback' })
-  handleRecordingCallback(@Body() body: any) {
-    this.logger.log(`Recording available for CallSid: ${body.CallSid}`);
-    return { received: true };
+  handleRecordingCallback(
+    @Body() body: any,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    try {
+      this.logger.log(`Recording available for CallSid: ${body?.CallSid}`);
+      return this.responseService.success(res, 'WEBHOOK_PROCESSED_SUCCESSFULLY', { received: true });
+    } catch (error: any) {
+      this.logger.error(`[RECORDING_CALLBACK] ❌ Error: ${error?.message}`, error?.stack);
+      const statusCode = error?.status || (error?.getStatus ? error.getStatus() : 500);
+      return this.responseService.error(req, res, error?.message || 'SOMETHING_WENT_WRONG', statusCode);
+    }
   }
 }

@@ -4,9 +4,7 @@ import * as request from 'supertest';
 import { AppModule } from '../../src/app.module';
 import { TwilioService } from '../../src/twilio/twilio.service';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { AiCall } from '../../src/ai-call/entities/ai-call.entity';
-import { Patient } from '../../src/patients/entities/patient.entity';
-import { Appointment } from '../../src/appointments/entities/appointment.entity';
+import { AiCall, PatientProfile, PatientAppointmentBooking } from '../../src/entities';
 import { CallStatus, CallType } from '../../src/common/constants';
 
 describe('AiCallController (e2e)', () => {
@@ -28,11 +26,11 @@ describe('AiCallController (e2e)', () => {
     };
 
     const mockPatientRepository = {
-      findOne: jest.fn().mockResolvedValue({ id: 'PAT-001', name: 'John Doe' }),
+      findOne: jest.fn().mockResolvedValue({ id: 'PAT-001', firstName: 'John', lastName: 'Doe' }),
     };
 
-    const mockAppointmentRepository = {
-      findOne: jest.fn().mockResolvedValue({ id: 'APT-001', status: 'PENDING' }),
+    const mockBookingRepository = {
+      findOne: jest.fn().mockResolvedValue({ id: 'APT-001', status: 1 }),
     };
 
     const moduleFixture: TestingModule = await Test.createTestingModule({
@@ -42,10 +40,10 @@ describe('AiCallController (e2e)', () => {
       .useValue(mockTwilioService)
       .overrideProvider(getRepositoryToken(AiCall))
       .useValue(mockAiCallRepository)
-      .overrideProvider(getRepositoryToken(Patient))
+      .overrideProvider(getRepositoryToken(PatientProfile))
       .useValue(mockPatientRepository)
-      .overrideProvider(getRepositoryToken(Appointment))
-      .useValue(mockAppointmentRepository)
+      .overrideProvider(getRepositoryToken(PatientAppointmentBooking))
+      .useValue(mockBookingRepository)
       .compile();
 
     app = moduleFixture.createNestApplication();
@@ -69,14 +67,13 @@ describe('AiCallController (e2e)', () => {
           language: 'en',
           callType: CallType.APPOINTMENT_CONFIRMATION,
         })
-        .expect(201);
+        .expect(200);
 
       expect(response.body).toMatchObject({
-        success: true,
-        twilioCallSid: 'CA-TEST-SID',
-        status: 'initiated',
+        code: 1,
+        status: 'SUCCESS',
       });
-      expect(response.body).toHaveProperty('callId');
+      expect(response.body.data).toHaveProperty('callId');
     });
 
     it('should return 400 with invalid body (missing phoneNumber)', async () => {
@@ -107,7 +104,11 @@ describe('AiCallController (e2e)', () => {
 
       const response = await request(app.getHttpServer()).get('/ai-call/CALL-001').expect(200);
 
-      expect(response.body).toHaveProperty('id', 'CALL-001');
+      expect(response.body).toMatchObject({
+        code: 1,
+        status: 'SUCCESS',
+      });
+      expect(response.body.data).toHaveProperty('id', 'CALL-001');
     });
   });
 });

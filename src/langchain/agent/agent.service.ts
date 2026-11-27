@@ -132,23 +132,28 @@ export class AgentService {
   ) {}
 
   private createModel() {
-    const configuredModel = this.configService.get<string>('GEMINI_MODEL');
-    const activeModel =
-      configuredModel &&
-      !configuredModel.includes('3.8') &&
-      !configuredModel.includes('2.0') &&
-      !configuredModel.includes('3.0') &&
-      !configuredModel.includes('1.5')
-        ? configuredModel
-        : 'gemini-3.5-flash-lite';
+    try {
+      const configuredModel = this.configService.get<string>('GEMINI_MODEL');
+      const activeModel =
+        configuredModel &&
+        !configuredModel.includes('3.8') &&
+        !configuredModel.includes('2.0') &&
+        !configuredModel.includes('3.0') &&
+        !configuredModel.includes('1.5')
+          ? configuredModel
+          : 'gemini-3.5-flash-lite';
 
-    return new ChatGoogleGenerativeAI({
-      apiKey: this.configService.get<string>('GOOGLE_API_KEY'),
-      model: activeModel,
-      temperature: 0.2,
-      maxOutputTokens: 200,
-      maxRetries: 0,
-    });
+      return new ChatGoogleGenerativeAI({
+        apiKey: this.configService.get<string>('GOOGLE_API_KEY'),
+        model: activeModel,
+        temperature: 0.2,
+        maxOutputTokens: 200,
+        maxRetries: 0,
+      });
+    } catch (error: any) {
+      this.logger.error(`Error in createModel: ${error?.message}`, error?.stack);
+      throw error;
+    }
   }
 
   /**
@@ -171,7 +176,11 @@ export class AgentService {
   }
 
   public clearContextCache(callId: string): void {
-    this.contextCache.delete(callId);
+    try {
+      this.contextCache.delete(callId);
+    } catch (error: any) {
+      this.logger.error(`Error in clearContextCache for callId=${callId}: ${error?.message}`, error?.stack);
+    }
   }
 
   private async getOrLoadContext(params: {
@@ -182,10 +191,11 @@ export class AgentService {
     slotId?: string;
     assignmentsId?: string;
   }): Promise<CachedCallContext> {
-    const cached = this.contextCache.get(params.callId);
-    if (cached) {
-      return cached;
-    }
+    try {
+      const cached = this.contextCache.get(params.callId);
+      if (cached) {
+        return cached;
+      }
 
     const [patientRes, clinicRes, physicianRes, slotRes, assignmentRes, specialtiesRes] =
       await Promise.all([
@@ -292,6 +302,10 @@ export class AgentService {
 
     this.contextCache.set(params.callId, contextData);
     return contextData;
+    } catch (error: any) {
+      this.logger.error(`Error in getOrLoadContext for callId=${params.callId}: ${error?.message}`, error?.stack);
+      throw error;
+    }
   }
 
   private formatSlotForLanguage(ctx: CachedCallContext, language: string): string {

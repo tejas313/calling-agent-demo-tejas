@@ -3,6 +3,7 @@ import { APP_GUARD } from '@nestjs/core';
 import { ConfigModule } from '@nestjs/config';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { DatabaseModule } from './database/database.module';
+import { CommonModule } from './common/common.module';
 import { LangsmithModule } from './langsmith/langsmith.module';
 import { PatientsModule } from './patients/patients.module';
 import { LangchainModule } from './langchain/langchain.module';
@@ -22,6 +23,7 @@ import { AiCallModule } from './ai-call/ai-call.module';
         limit: 10,
       },
     ]),
+    CommonModule,
     DatabaseModule,
     LangsmithModule,
     PatientsModule,

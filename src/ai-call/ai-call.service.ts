@@ -131,7 +131,8 @@ export class AiCallService {
     webhookUrl?: string;
     hint?: string;
   }> {
-    if (!isValidPhoneNumber(dto.phoneNumber)) {
+    try {
+      if (!isValidPhoneNumber(dto.phoneNumber)) {
       const reason = `Invalid phone number format "${dto.phoneNumber}". Please provide a valid international number in E.164 format (e.g. +14165551234).`;
       this.logger.warn(reason);
       await this.logCallEvent({
@@ -447,6 +448,10 @@ export class AiCallService {
 
       throw error;
     }
+    } catch (error: any) {
+      this.logger.error(`Error in startCall: ${error?.message}`, error?.stack);
+      throw error;
+    }
   }
 
   async handleVoiceWebhook(
@@ -457,7 +462,8 @@ export class AiCallService {
     confidence?: string | number,
     defaultLang?: string,
   ): Promise<string> {
-    const turnStartMs = Date.now();
+    try {
+      const turnStartMs = Date.now();
     this.logger.log(
       `[handleVoiceWebhook] ▶ callId=${callId}, callSid=${callSid}, speechResult="${speechResult}", digits="${digits}", confidence="${confidence}", defaultLang="${defaultLang}"`,
     );
@@ -697,6 +703,10 @@ export class AiCallService {
 
     const pollUrl = `${publicBaseUrl}/ai-call/twilio/poll?callId=${callId}`;
     return this.twilioService.generateHoldTwiML(pollUrl, aiCall.language);
+    } catch (error: any) {
+      this.logger.error(`Error in handleVoiceWebhook for callId=${callId}: ${error?.message}`, error?.stack);
+      throw error;
+    }
   }
 
   private isLikelyFrench(text: string): boolean {
@@ -877,198 +887,218 @@ export class AiCallService {
   private async bookConfirmedSlot(
     aiCall: AiCall,
   ): Promise<{ booked: boolean; bookingId?: string; reason?: string }> {
-    return this.dataSource.transaction(async (manager) => {
-      const slotRepo = manager.getRepository(PhysicianPatientSlot);
-      const bookingRepo = manager.getRepository(PatientAppointmentBooking);
+    try {
+      return await this.dataSource.transaction(async (manager) => {
+        const slotRepo = manager.getRepository(PhysicianPatientSlot);
+        const bookingRepo = manager.getRepository(PatientAppointmentBooking);
 
-      const slot = await slotRepo.findOne({
-        where: { id: aiCall.slotId },
-        lock: { mode: 'pessimistic_write' },
-      });
-
-      if (!slot) {
-        const reason = `Slot ${aiCall.slotId} not found during confirmation booking.`;
-        this.logger.warn(`[bookConfirmedSlot] ${reason}`);
-        await this.logCallEvent({
-          callId: aiCall.id,
-          twilioCallSid: aiCall.twilioCallSid,
-          patientId: aiCall.patientId,
-          assignmentsId: aiCall.assignmentsId,
-          eventType: 'BOOKING_CONFLICT',
-          level: 'ERROR',
-          message: reason,
+        const slot = await slotRepo.findOne({
+          where: { id: aiCall.slotId },
+          lock: { mode: 'pessimistic_write' },
         });
-        return { booked: false, reason };
-      }
 
-      const existingBooking = await bookingRepo.findOne({
-        where: { patientSlotId: slot.id },
-      });
-
-      if (existingBooking) {
-        if (existingBooking.patientId === aiCall.patientId) {
-          return { booked: true, bookingId: existingBooking.id };
+        if (!slot) {
+          const reason = `Slot ${aiCall.slotId} not found during confirmation booking.`;
+          this.logger.warn(`[bookConfirmedSlot] ${reason}`);
+          await this.logCallEvent({
+            callId: aiCall.id,
+            twilioCallSid: aiCall.twilioCallSid,
+            patientId: aiCall.patientId,
+            assignmentsId: aiCall.assignmentsId,
+            eventType: 'BOOKING_CONFLICT',
+            level: 'ERROR',
+            message: reason,
+          });
+          return { booked: false, reason };
         }
-        const reason = `Slot ${slot.id} was already booked by another patient (booking=${existingBooking.id}).`;
-        this.logger.warn(`[bookConfirmedSlot] ${reason}`);
-        await this.logCallEvent({
-          callId: aiCall.id,
-          twilioCallSid: aiCall.twilioCallSid,
-          patientId: aiCall.patientId,
-          assignmentsId: aiCall.assignmentsId,
-          eventType: 'BOOKING_CONFLICT',
-          level: 'ERROR',
-          message: reason,
-          details: { slotId: slot.id, existingBookingId: existingBooking.id },
+
+        const existingBooking = await bookingRepo.findOne({
+          where: { patientSlotId: slot.id },
         });
-        return { booked: false, reason };
-      }
 
-      if (slot.status !== 1) {
-        const reason = `Slot ${slot.id} is no longer available (status=${slot.status}).`;
-        this.logger.warn(`[bookConfirmedSlot] ${reason}`);
-        await this.logCallEvent({
-          callId: aiCall.id,
-          twilioCallSid: aiCall.twilioCallSid,
+        if (existingBooking) {
+          if (existingBooking.patientId === aiCall.patientId) {
+            return { booked: true, bookingId: existingBooking.id };
+          }
+          const reason = `Slot ${slot.id} was already booked by another patient (booking=${existingBooking.id}).`;
+          this.logger.warn(`[bookConfirmedSlot] ${reason}`);
+          await this.logCallEvent({
+            callId: aiCall.id,
+            twilioCallSid: aiCall.twilioCallSid,
+            patientId: aiCall.patientId,
+            assignmentsId: aiCall.assignmentsId,
+            eventType: 'BOOKING_CONFLICT',
+            level: 'ERROR',
+            message: reason,
+            details: { slotId: slot.id, existingBookingId: existingBooking.id },
+          });
+          return { booked: false, reason };
+        }
+
+        if (slot.status !== 1) {
+          const reason = `Slot ${slot.id} is no longer available (status=${slot.status}).`;
+          this.logger.warn(`[bookConfirmedSlot] ${reason}`);
+          await this.logCallEvent({
+            callId: aiCall.id,
+            twilioCallSid: aiCall.twilioCallSid,
+            patientId: aiCall.patientId,
+            assignmentsId: aiCall.assignmentsId,
+            eventType: 'BOOKING_CONFLICT',
+            level: 'ERROR',
+            message: reason,
+            details: { slotId: slot.id, status: slot.status },
+          });
+          return { booked: false, reason };
+        }
+
+        slot.status = 2;
+        await slotRepo.save(slot);
+
+        const booking = bookingRepo.create({
           patientId: aiCall.patientId,
-          assignmentsId: aiCall.assignmentsId,
-          eventType: 'BOOKING_CONFLICT',
-          level: 'ERROR',
-          message: reason,
-          details: { slotId: slot.id, status: slot.status },
-        });
-        return { booked: false, reason };
-      }
-
-      slot.status = 2;
-      await slotRepo.save(slot);
-
-      const booking = bookingRepo.create({
-        patientId: aiCall.patientId,
-        clinicId: aiCall.clinicId,
-        physicianProfileId: slot.physicianProfileId,
-        patientSlotId: slot.id,
-        appointmentDate: slot.date,
-        startTime: slot.startTime,
-        endTime: slot.endTime,
-        status: 1,
-        bookedBy: 1,
-        patientNote: `Confirmed via AI call ${aiCall.id}`,
-      });
-      await bookingRepo.save(booking);
-
-      this.logger.log(
-        `[bookConfirmedSlot] ✅ Slot ${slot.id} marked status=2 and booking ${booking.id} created.`,
-      );
-      await this.logCallEvent({
-        callId: aiCall.id,
-        twilioCallSid: aiCall.twilioCallSid,
-        patientId: aiCall.patientId,
-        assignmentsId: aiCall.assignmentsId,
-        eventType: 'BOOKING_CONFIRMED',
-        level: 'INFO',
-        message: `Slot ${slot.id} booked (${slot.date} ${slot.startTime}-${slot.endTime}), bookingId=${booking.id}`,
-        details: {
-          slotId: slot.id,
-          bookingId: booking.id,
+          clinicId: aiCall.clinicId,
+          physicianProfileId: slot.physicianProfileId,
+          patientSlotId: slot.id,
           appointmentDate: slot.date,
           startTime: slot.startTime,
           endTime: slot.endTime,
-        },
-      });
+          status: 1,
+          bookedBy: 1,
+          patientNote: `Confirmed via AI call ${aiCall.id}`,
+        });
+        await bookingRepo.save(booking);
 
-      return { booked: true, bookingId: booking.id };
-    });
+        this.logger.log(
+          `[bookConfirmedSlot] ✅ Slot ${slot.id} marked status=2 and booking ${booking.id} created.`,
+        );
+        await this.logCallEvent({
+          callId: aiCall.id,
+          twilioCallSid: aiCall.twilioCallSid,
+          patientId: aiCall.patientId,
+          assignmentsId: aiCall.assignmentsId,
+          eventType: 'BOOKING_CONFIRMED',
+          level: 'INFO',
+          message: `Slot ${slot.id} booked (${slot.date} ${slot.startTime}-${slot.endTime}), bookingId=${booking.id}`,
+          details: {
+            slotId: slot.id,
+            bookingId: booking.id,
+            appointmentDate: slot.date,
+            startTime: slot.startTime,
+            endTime: slot.endTime,
+          },
+        });
+
+        return { booked: true, bookingId: booking.id };
+      });
+    } catch (error: any) {
+      this.logger.error(`Error in bookConfirmedSlot for callId=${aiCall.id}: ${error?.message}`, error?.stack);
+      throw error;
+    }
   }
 
   async handlePollWebhook(callId: string): Promise<string> {
-    const publicBaseUrl = this.configService.get<string>('PUBLIC_BASE_URL');
+    try {
+      const publicBaseUrl = this.configService.get<string>('PUBLIC_BASE_URL');
 
-    if (!this.pendingResponses.has(callId)) {
-      await this.logCallEvent({
-        callId,
-        eventType: 'ERROR',
-        level: 'ERROR',
-        message: `Poll webhook called for callId=${callId} with no pending response`,
-      });
-      return this.twilioService.generateTwiML(
-        'An error occurred. Please call the clinic directly. Goodbye.',
-        'en',
-      );
+      if (!this.pendingResponses.has(callId)) {
+        await this.logCallEvent({
+          callId,
+          eventType: 'ERROR',
+          level: 'ERROR',
+          message: `Poll webhook called for callId=${callId} with no pending response`,
+        });
+        return this.twilioService.generateTwiML(
+          'An error occurred. Please call the clinic directly. Goodbye.',
+          'en',
+        );
+      }
+
+      const twiml = this.pendingResponses.get(callId);
+      if (twiml === null) {
+        const pollUrl = `${publicBaseUrl}/ai-call/twilio/poll?callId=${callId}`;
+        return this.twilioService.generatePollWaitTwiML(pollUrl);
+      }
+
+      this.pendingResponses.delete(callId);
+      return twiml;
+    } catch (error: any) {
+      this.logger.error(`Error in handlePollWebhook for callId=${callId}: ${error?.message}`, error?.stack);
+      throw error;
     }
-
-    const twiml = this.pendingResponses.get(callId);
-    if (twiml === null) {
-      const pollUrl = `${publicBaseUrl}/ai-call/twilio/poll?callId=${callId}`;
-      return this.twilioService.generatePollWaitTwiML(pollUrl);
-    }
-
-    this.pendingResponses.delete(callId);
-    return twiml;
   }
 
   async handleStatusCallback(body: any): Promise<void> {
-    if (!body.CallSid) return;
-    const aiCall = await this.aiCallRepository.findOne({
-      where: { twilioCallSid: body.CallSid },
-    });
-    if (!aiCall) return;
+    try {
+      if (!body.CallSid) return;
+      const aiCall = await this.aiCallRepository.findOne({
+        where: { twilioCallSid: body.CallSid },
+      });
+      if (!aiCall) return;
 
-    const statusMap: Record<string, CallStatus> = {
-      initiated: CallStatus.INITIATED,
-      ringing: CallStatus.RINGING,
-      answered: CallStatus.ANSWERED,
-      completed: CallStatus.COMPLETED,
-      busy: CallStatus.FAILED,
-      failed: CallStatus.FAILED,
-      'no-answer': CallStatus.NO_ANSWER,
-      canceled: CallStatus.FAILED,
-    };
+      const statusMap: Record<string, CallStatus> = {
+        initiated: CallStatus.INITIATED,
+        ringing: CallStatus.RINGING,
+        answered: CallStatus.ANSWERED,
+        completed: CallStatus.COMPLETED,
+        busy: CallStatus.FAILED,
+        failed: CallStatus.FAILED,
+        'no-answer': CallStatus.NO_ANSWER,
+        canceled: CallStatus.FAILED,
+      };
 
-    const newStatus = statusMap[body.CallStatus];
-    if (newStatus && aiCall.status !== CallStatus.COMPLETED) {
-      aiCall.status = newStatus;
-    }
-
-    if (body.CallStatus === 'completed') {
-      aiCall.status = CallStatus.COMPLETED;
-      aiCall.endedAt = new Date();
-      if (body.CallDuration) {
-        aiCall.duration = parseInt(body.CallDuration, 10);
+      const newStatus = statusMap[body.CallStatus];
+      if (newStatus && aiCall.status !== CallStatus.COMPLETED) {
+        aiCall.status = newStatus;
       }
-      this.agentService.clearContextCache(aiCall.id);
-    }
 
-    const isErrorStatus = ['busy', 'failed', 'no-answer', 'canceled'].includes(body.CallStatus);
-    if (isErrorStatus && body.ErrorMessage) {
-      aiCall.lastError = body.ErrorMessage;
-    }
+      if (body.CallStatus === 'completed') {
+        aiCall.status = CallStatus.COMPLETED;
+        aiCall.endedAt = new Date();
+        if (body.CallDuration) {
+          aiCall.duration = parseInt(body.CallDuration, 10);
+        }
+        this.agentService.clearContextCache(aiCall.id);
+      }
 
-    await this.aiCallRepository.save(aiCall);
-    void this.logCallEvent({
-      callId: aiCall.id,
-      twilioCallSid: body.CallSid,
-      patientId: aiCall.patientId,
-      assignmentsId: aiCall.assignmentsId,
-      eventType: 'TWILIO_STATUS',
-      level: isErrorStatus ? 'ERROR' : 'INFO',
-      message: `Twilio status callback: ${body.CallStatus}${body.CallDuration ? ` (${body.CallDuration}s)` : ''}`,
-      details: {
-        callStatus: body.CallStatus,
-        callDuration: body.CallDuration,
-        errorCode: body.ErrorCode,
-        errorMessage: body.ErrorMessage,
-      },
-    });
+      const isErrorStatus = ['busy', 'failed', 'no-answer', 'canceled'].includes(body.CallStatus);
+      if (isErrorStatus && body.ErrorMessage) {
+        aiCall.lastError = body.ErrorMessage;
+      }
+
+      await this.aiCallRepository.save(aiCall);
+      void this.logCallEvent({
+        callId: aiCall.id,
+        twilioCallSid: body.CallSid,
+        patientId: aiCall.patientId,
+        assignmentsId: aiCall.assignmentsId,
+        eventType: 'TWILIO_STATUS',
+        level: isErrorStatus ? 'ERROR' : 'INFO',
+        message: `Twilio status callback: ${body.CallStatus}${body.CallDuration ? ` (${body.CallDuration}s)` : ''}`,
+        details: {
+          callStatus: body.CallStatus,
+          callDuration: body.CallDuration,
+          errorCode: body.ErrorCode,
+          errorMessage: body.ErrorMessage,
+        },
+      });
+    } catch (error: any) {
+      this.logger.error(`Error in handleStatusCallback: ${error?.message}`, error?.stack);
+      throw error;
+    }
   }
 
   async getCall(id: string): Promise<AiCall> {
-    const aiCall = await this.aiCallRepository.findOne({ where: { id } });
-    if (!aiCall) {
-      throw new NotFoundException(`AiCall with id ${id} not found`);
+    try {
+      const aiCall = await this.aiCallRepository.findOne({ where: { id } });
+      if (!aiCall) {
+        throw new NotFoundException(`AiCall with id ${id} not found`);
+      }
+      const { conversationHistory: _conversationHistory, ...safeCall } = aiCall;
+      return safeCall as AiCall;
+    } catch (error: any) {
+      this.logger.error(`Error in getCall for ID ${id}: ${error?.message}`, error?.stack);
+      throw error;
     }
-    const { conversationHistory: _conversationHistory, ...safeCall } = aiCall;
-    return safeCall as AiCall;
   }
 
   async getTranscript(id: string): Promise<{
@@ -1077,28 +1107,38 @@ export class AiCallService {
     status: string;
     outcome: string | null;
   }> {
-    const aiCall = await this.aiCallRepository.findOne({ where: { id } });
-    if (!aiCall) {
-      throw new NotFoundException(`AiCall with id ${id} not found`);
+    try {
+      const aiCall = await this.aiCallRepository.findOne({ where: { id } });
+      if (!aiCall) {
+        throw new NotFoundException(`AiCall with id ${id} not found`);
+      }
+      return {
+        callId: id,
+        transcript: aiCall.transcript,
+        status: aiCall.status,
+        outcome: aiCall.outcome,
+      };
+    } catch (error: any) {
+      this.logger.error(`Error in getTranscript for ID ${id}: ${error?.message}`, error?.stack);
+      throw error;
     }
-    return {
-      callId: id,
-      transcript: aiCall.transcript,
-      status: aiCall.status,
-      outcome: aiCall.outcome,
-    };
   }
 
   async getLogs(id: string): Promise<{ callId: string; logs: AiCallLog[] }> {
-    const aiCall = await this.aiCallRepository.findOne({ where: { id } });
-    if (!aiCall) {
-      throw new NotFoundException(`AiCall with id ${id} not found`);
+    try {
+      const aiCall = await this.aiCallRepository.findOne({ where: { id } });
+      if (!aiCall) {
+        throw new NotFoundException(`AiCall with id ${id} not found`);
+      }
+      const logs = await this.aiCallLogRepository.find({
+        where: { callId: id },
+        order: { createdAt: 'ASC' },
+      });
+      return { callId: id, logs };
+    } catch (error: any) {
+      this.logger.error(`Error in getLogs for ID ${id}: ${error?.message}`, error?.stack);
+      throw error;
     }
-    const logs = await this.aiCallLogRepository.find({
-      where: { callId: id },
-      order: { createdAt: 'ASC' },
-    });
-    return { callId: id, logs };
   }
 
   private serializeHistory(history: BaseMessage[]): any[] {

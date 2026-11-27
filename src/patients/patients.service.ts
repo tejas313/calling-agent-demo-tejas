@@ -13,23 +13,38 @@ export class PatientsService {
   ) {}
 
   async findAll(): Promise<PatientProfile[]> {
-    return this.patientRepository.find();
+    try {
+      return await this.patientRepository.find();
+    } catch (error: any) {
+      this.logger.error(`Error in findAll: ${error?.message}`, error?.stack);
+      throw error;
+    }
   }
 
   async findById(id: string): Promise<PatientProfile> {
-    const patient = await this.patientRepository.findOne({ where: { id } });
-    if (!patient) {
-      throw new NotFoundException(`Patient with ID ${id} not found`);
+    try {
+      const patient = await this.patientRepository.findOne({ where: { id } });
+      if (!patient) {
+        throw new NotFoundException(`Patient with ID ${id} not found`);
+      }
+      return patient;
+    } catch (error: any) {
+      this.logger.error(`Error in findById for ID ${id}: ${error?.message}`, error?.stack);
+      throw error;
     }
-    return patient;
   }
 
   async findByPhone(phone: string): Promise<PatientProfile | null> {
-    const normalizedPhone = phone.replace(/\D/g, '');
-    const patients = await this.patientRepository.find();
-    return (
-      patients.find((p) => (p.phone || '').replace(/\D/g, '') === normalizedPhone) || null
-    );
+    try {
+      const normalizedPhone = phone.replace(/\D/g, '');
+      const patients = await this.patientRepository.find();
+      return (
+        patients.find((p) => (p.phone || '').replace(/\D/g, '') === normalizedPhone) || null
+      );
+    } catch (error: any) {
+      this.logger.error(`Error in findByPhone for phone ${phone}: ${error?.message}`, error?.stack);
+      throw error;
+    }
   }
 
   async verifyPatient(
@@ -51,10 +66,11 @@ export class PatientsService {
       }
 
       return { verified: false, reason: 'Phone number does not match our records' };
-    } catch (error) {
+    } catch (error: any) {
       if (error instanceof NotFoundException) {
         return { verified: false, reason: 'Patient not found' };
       }
+      this.logger.error(`Error in verifyPatient for patientId ${patientId}: ${error?.message}`, error?.stack);
       throw error;
     }
   }

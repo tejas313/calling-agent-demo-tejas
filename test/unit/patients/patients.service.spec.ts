@@ -2,14 +2,14 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { NotFoundException } from '@nestjs/common';
 import { PatientsService } from '../../../src/patients/patients.service';
-import { Patient } from '../../../src/patients/entities/patient.entity';
+import { PatientProfile } from '../../../src/entities/patient-profile.entity';
 
-const mockPatient: Patient = {
+const mockPatient: Partial<PatientProfile> = {
   id: 'PAT-001',
-  name: 'John Smith',
+  firstName: 'John',
+  lastName: 'Smith',
   phone: '+14165551001',
   dateOfBirth: new Date('1980-03-15'),
-  language: 'en',
   clinicId: 'CLINIC-001',
   createdAt: new Date(),
   updatedAt: new Date(),
@@ -31,7 +31,7 @@ describe('PatientsService', () => {
       providers: [
         PatientsService,
         {
-          provide: getRepositoryToken(Patient),
+          provide: getRepositoryToken(PatientProfile),
           useValue: mockRepository,
         },
       ],
@@ -56,7 +56,6 @@ describe('PatientsService', () => {
 
   describe('findByPhone', () => {
     it('should return patient by phone when found', async () => {
-      // findByPhone uses find() then filters, not findOne
       mockRepository.find.mockResolvedValue([mockPatient]);
       const result = await service.findByPhone('+14165551001');
       expect(result).not.toBeNull();
@@ -71,7 +70,6 @@ describe('PatientsService', () => {
   });
 
   describe('verifyPatient', () => {
-    // Signature: verifyPatient(phoneNumber: string, patientId: string)
     it('should return verified=true when phone matches', async () => {
       mockRepository.findOne.mockResolvedValue(mockPatient);
       const result = await service.verifyPatient('+14165551001', 'PAT-001');
@@ -96,7 +94,6 @@ describe('PatientsService', () => {
 
     it('should handle normalized phone numbers (strip +, dashes, spaces)', async () => {
       mockRepository.findOne.mockResolvedValue(mockPatient);
-      // Patient has +14165551001, we pass 1-416-555-1001 (without +)
       const result = await service.verifyPatient('14165551001', 'PAT-001');
       expect(result.verified).toBe(true);
     });
