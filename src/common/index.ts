@@ -1,4 +1,5 @@
 export * from './constants';
+export * from './database.types';
 export * from './response.service';
 export * from './common.module';
 export * from './filters/validation-exception.filter';

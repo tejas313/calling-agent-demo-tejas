@@ -47,7 +47,8 @@ export enum Language {
 
 export const SUPPORTED_LANGUAGES: string[] = ['en', 'fr'];
 export const DEFAULT_LANGUAGE = 'en';
-export const MAX_CALL_TURNS = 10;
+export const MAX_CALL_TURNS = 12;
+export const MAX_NO_INPUT_RETRIES = 3;
 export const VOICE_LANGUAGE_MAP: Record<string, string> = {
   en: 'en-US',
   fr: 'fr-FR',

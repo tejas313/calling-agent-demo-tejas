@@ -1,9 +1,10 @@
-import { Controller, Post, Get, Body, Param, Query, Res, Req, HttpCode, Logger } from '@nestjs/common';
+import { Controller, Post, Get, Body, Param, Query, Res, Req, HttpCode, Logger, Optional } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBody } from '@nestjs/swagger';
 import { Request, Response } from 'express';
 import { Throttle, SkipThrottle } from '@nestjs/throttler';
 import { AiCallService } from './ai-call.service';
 import { ResponseService } from '../common/response.service';
+import { TwilioService } from '../twilio/twilio.service';
 import { StartCallDto } from './dto/start-call.dto';
 import { TwilioVoiceDto } from './dto/twilio-voice.dto';
 import { TwilioStatusDto } from './dto/twilio-status.dto';
@@ -16,6 +17,8 @@ export class AiCallController {
   constructor(
     private readonly aiCallService: AiCallService,
     private readonly responseService: ResponseService,
+    @Optional()
+    private readonly twilioService?: TwilioService,
   ) {}
 
   @Post('start')
@@ -115,7 +118,12 @@ export class AiCallController {
       return res.send(twiml);
     } catch (error: any) {
       this.logger.error(`[POLL] ❌ Error: ${error?.message}`);
-      const fallback = '<Response><Say voice="Polly.Danielle-Neural" language="en-US">We are experiencing technical difficulties. Goodbye.</Say><Hangup/></Response>';
+      const fallback =
+        this.twilioService?.generateTwiML(
+          'We are experiencing technical difficulties. Goodbye.',
+          'en',
+        ) ||
+        '<Response><Say voice="Polly.Danielle-Generative" language="en-US">We are experiencing technical difficulties. Goodbye.</Say><Hangup/></Response>';
       res.setHeader('Content-Type', 'text/xml');
       return res.send(fallback);
     }
@@ -164,7 +172,11 @@ export class AiCallController {
       const callId = rawCallId ? rawCallId.split('?')[0].split('&')[0].trim() : '';
       this.logger.error(`[WEBHOOK] ❌ FATAL ERROR in handleVoiceWebhook for callId=${callId}: ${error?.message}`, error?.stack);
       const fallbackTwiml =
-        '<Response><Say voice="Polly.Danielle-Neural" language="en-US">We are experiencing technical difficulties. Please call the clinic directly. Goodbye.</Say><Hangup/></Response>';
+        this.twilioService?.generateTwiML(
+          'We are experiencing technical difficulties. Please call the clinic directly. Goodbye.',
+          'en',
+        ) ||
+        '<Response><Say voice="Polly.Danielle-Generative" language="en-US">We are experiencing technical difficulties. Please call the clinic directly. Goodbye.</Say><Hangup/></Response>';
       res.setHeader('Content-Type', 'text/xml');
       return res.send(fallbackTwiml);
     }

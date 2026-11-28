@@ -5,9 +5,9 @@ import * as twilio from "twilio";
 /**
  * Service responsible for interacting with Twilio Voice APIs and generating TwiML.
  * Configured with:
- * - Amazon Polly Neural voices for natural human inflection.
- * - Instant barge-in (caller speaks -> agent stops speaking immediately).
- * - Fast silence cut-off (speechTimeout=1s) to eliminate dead air.
+ * - Amazon Polly Generative voices (configurable via TTS_VOICE_EN / TTS_VOICE_FR) for natural human inflection.
+ * - Natural conversational pacing (default 100% native speech rate) for clear telephony comprehension.
+ * - Fast silence cut-off (default speechTimeout=1s) so turns feel responsive.
  * - Dual-input mode (speech + DTMF keypad press) for high accuracy.
  * - Bilingual support for English and French.
  */
@@ -16,6 +16,9 @@ export class TwilioService {
   private readonly logger = new Logger(TwilioService.name);
   private readonly client: twilio.Twilio;
   private readonly speechRate: string;
+  private readonly speechTimeout: string;
+  private readonly voiceEn: string;
+  private readonly voiceFr: string;
 
   constructor(private readonly configService: ConfigService) {
     try {
@@ -24,7 +27,13 @@ export class TwilioService {
       const twilioFactory = (twilio as any).default || twilio;
       this.client = twilioFactory(accountSid, authToken);
       const configuredRate = this.configService.get<string>("TTS_SPEECH_RATE")?.trim();
-      this.speechRate = configuredRate || "93%";
+      this.speechRate = configuredRate || "100%";
+      const configuredSpeechTimeout = this.configService.get<string>("STT_SPEECH_TIMEOUT")?.trim();
+      this.speechTimeout = configuredSpeechTimeout || "1";
+      const configuredVoiceEn = this.configService.get<string>("TTS_VOICE_EN")?.trim();
+      this.voiceEn = configuredVoiceEn || "Polly.Danielle-Generative";
+      const configuredVoiceFr = this.configService.get<string>("TTS_VOICE_FR")?.trim();
+      this.voiceFr = configuredVoiceFr || "Polly.Lea-Generative";
     } catch (error: any) {
       this.logger.error(`Error initializing TwilioService: ${error?.message}`, error?.stack);
     }
@@ -95,8 +104,9 @@ export class TwilioService {
    */
   public generateLanguageSelectionTwiML(actionUrl: string): string {
     try {
-      const separator = actionUrl.includes("?") ? "&amp;" : "?";
-      const fallbackRedirectUrl = `${actionUrl}${separator}defaultLang=en`;
+      const escapedActionUrl = this.escapeXml(actionUrl);
+      const separator = escapedActionUrl.includes("?") ? "&amp;" : "?";
+      const fallbackRedirectUrl = `${escapedActionUrl}${separator}defaultLang=en`;
       const enPrompt = this.formatSayBody(
         "For English, press 1 or say English.",
         "en",
@@ -110,13 +120,16 @@ export class TwilioService {
         "en",
       );
 
+      this.logger.log(
+        `[TwilioService] 🔊 Language selection TwiML: playing bilingual English + French prompt`,
+      );
       return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Gather input="speech dtmf" numDigits="1" action="${actionUrl}" method="POST" language="en-US" speechModel="phone_call" enhanced="true" bargeIn="true" speechTimeout="1" timeout="6" hints="English, French, Français, press one, press two, one, two, un, deux">
-    <Say voice="Polly.Danielle-Neural" language="en-US">${enPrompt}</Say>
-    <Say voice="Polly.Lea-Neural" language="fr-FR">${frPrompt}</Say>
+  <Gather input="speech dtmf" numDigits="1" action="${escapedActionUrl}" actionOnEmptyResult="true" method="POST" language="en-US" speechModel="phone_call" enhanced="true" bargeIn="false" speechTimeout="${this.speechTimeout}" timeout="8" hints="English, French, Français, press one, press two, one, two, un, deux">
+    <Say voice="${this.voiceEn}" language="en-US">${enPrompt}</Say>
+    <Say voice="${this.voiceFr}" language="fr-FR">${frPrompt}</Say>
   </Gather>
-  <Say voice="Polly.Danielle-Neural" language="en-US">${fallbackPrompt}</Say>
+  <Say voice="${this.voiceEn}" language="en-US">${fallbackPrompt}</Say>
   <Redirect method="POST">${fallbackRedirectUrl}</Redirect>
 </Response>`;
     } catch (error: any) {
@@ -140,11 +153,12 @@ export class TwilioService {
     try {
       const isFrench = language === "fr";
       const lang = isFrench ? "fr-FR" : "en-US";
-      const voice = isFrench ? "Polly.Lea-Neural" : "Polly.Danielle-Neural";
+      const voice = isFrench ? this.voiceFr : this.voiceEn;
       const speechModel = isFrench ? "default" : "phone_call";
 
       const baseHints = isFrench
         ? [
+            "oui je confirme ce rendez-vous",
             "oui je confirme",
             "je confirme",
             "confirmer le rendez-vous",
@@ -166,6 +180,8 @@ export class TwilioService {
             "rendez-vous",
           ]
         : [
+            "yes confirm this appointment",
+            "confirm this appointment",
             "yes please confirm",
             "please confirm",
             "confirm my appointment",
@@ -176,6 +192,7 @@ export class TwilioService {
             "confirm",
             "yes book it",
             "book appointment",
+            "cancel this appointment",
             "yes please cancel",
             "please cancel",
             "cancel my appointment",
@@ -197,26 +214,37 @@ export class TwilioService {
           ];
 
       const sanitizedExtra = (extraHints || [])
-        .map((h) => h.replace(/[<>&"']/g, " ").trim())
+        .map((h) => h.replace(/[<>&"',]/g, " ").replace(/\s+/g, " ").trim())
         .filter(Boolean);
-      const hints = [...baseHints, ...sanitizedExtra].join(", ");
-
-      const fallbackNoInput = isFrench
-        ? "Je n'ai pas entendu de réponse. Au revoir."
-        : "I didn't hear a response. Goodbye.";
+      const seenHints = new Set<string>();
+      const allHints = [...sanitizedExtra, ...baseHints].filter((h) => {
+        const key = h.toLowerCase();
+        if (seenHints.has(key)) return false;
+        seenHints.add(key);
+        return true;
+      });
+      const boundedHints: string[] = [];
+      let totalLen = 0;
+      for (const hint of allHints) {
+        const addition = boundedHints.length === 0 ? hint.length : hint.length + 2;
+        if (totalLen + addition > 500) break;
+        boundedHints.push(hint);
+        totalLen += addition;
+      }
+      const hints = boundedHints.join(", ");
 
       const sayBody = this.formatSayBody(text, language);
-      const fallbackBody = this.formatSayBody(fallbackNoInput, language);
-
       const enhancedAttr = speechModel === "phone_call" ? ' enhanced="true"' : "";
+      const escapedActionUrl = this.escapeXml(actionUrl);
+      const escapedHints = this.escapeXml(hints);
 
+      this.logger.log(`[TwilioService] 🔊 Gather <Say> [${voice}]: "${text}"`);
       return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Gather input="speech dtmf" action="${actionUrl}" method="POST" language="${lang}" speechModel="${speechModel}"${enhancedAttr} speechTimeout="1" timeout="8" profanityFilter="false" bargeIn="false" hints="${hints}">
+  <Gather input="speech dtmf" action="${escapedActionUrl}" actionOnEmptyResult="true" method="POST" language="${lang}" speechModel="${speechModel}"${enhancedAttr} speechTimeout="${this.speechTimeout}" timeout="10" profanityFilter="false" bargeIn="true" hints="${escapedHints}">
     <Say voice="${voice}" language="${lang}">${sayBody}</Say>
   </Gather>
-  <Say voice="${voice}" language="${lang}">${fallbackBody}</Say>
-  <Hangup/>
+  <Redirect method="POST">${escapedActionUrl}</Redirect>
 </Response>`;
     } catch (error: any) {
       this.logger.error(`Error in generateGatherTwiML: ${error?.message}`, error?.stack);
@@ -232,9 +260,10 @@ export class TwilioService {
     try {
       const isFrench = language === "fr";
       const lang = isFrench ? "fr-FR" : "en-US";
-      const voice = isFrench ? "Polly.Lea-Neural" : "Polly.Danielle-Neural";
+      const voice = isFrench ? this.voiceFr : this.voiceEn;
       const sayBody = this.formatSayBody(text, language);
 
+      this.logger.log(`[TwilioService] 🔊 Final <Say> [${voice}]: "${text}"`);
       return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Say voice="${voice}" language="${lang}">${sayBody}</Say>
@@ -250,13 +279,13 @@ export class TwilioService {
     try {
       const isFrench = language === "fr";
       const lang = isFrench ? "fr-FR" : "en-US";
-      const voice = isFrench ? "Polly.Lea-Neural" : "Polly.Danielle-Neural";
+      const voice = isFrench ? this.voiceFr : this.voiceEn;
       const holdText = isFrench
         ? "Un instant s'il vous plaît."
         : "One moment please.";
       const sayBody = this.formatSayBody(holdText, language);
 
-      return `<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="${voice}" language="${lang}">${sayBody}</Say><Pause length="1"/><Redirect method="POST">${pollUrl}</Redirect></Response>`;
+      return `<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="${voice}" language="${lang}">${sayBody}</Say><Pause length="1"/><Redirect method="POST">${this.escapeXml(pollUrl)}</Redirect></Response>`;
     } catch (error: any) {
       this.logger.error(`Error in generateHoldTwiML: ${error?.message}`, error?.stack);
       throw error;
@@ -265,7 +294,7 @@ export class TwilioService {
 
   public generatePollWaitTwiML(pollUrl: string): string {
     try {
-      return `<?xml version="1.0" encoding="UTF-8"?><Response><Pause length="1"/><Redirect method="POST">${pollUrl}</Redirect></Response>`;
+      return `<?xml version="1.0" encoding="UTF-8"?><Response><Pause length="1"/><Redirect method="POST">${this.escapeXml(pollUrl)}</Redirect></Response>`;
     } catch (error: any) {
       this.logger.error(`Error in generatePollWaitTwiML: ${error?.message}`, error?.stack);
       throw error;
@@ -277,25 +306,34 @@ export class TwilioService {
   }
 
   /**
-   * Normalizes text, escapes XML entities, inserts short pauses between sentences,
-   * and wraps in SSML <prosody rate="..."> so Polly Neural speaks at a natural pace.
+   * Normalizes text, escapes XML entities, wraps phone numbers in SSML <say-as>,
+   * and applies <prosody rate="..."> only when a custom non-100% rate is configured
+   * so Polly Generative voices retain their natural human cadence and intonation.
    */
   public formatSayBody(text: string, language?: string): string {
     try {
       const normalized = this.normalizeForTTS(text, language);
       const escaped = this.escapeXml(normalized);
-      const withBreaks = escaped.replace(/([.!?])\s+/g, '$1 <break time="220ms"/> ');
-      return `<prosody rate="${this.speechRate}">${withBreaks}</prosody>`;
+      const withPhones = escaped.replace(
+        /(?:\+?\d{1,3}[\s.-]?)?(?:\(\d{3}\)|\d{3})[\s.-]?\d{3}[\s.-]?\d{4}\b/g,
+        (match) => `<say-as interpret-as="telephone">${match}</say-as>`,
+      );
+      const normalizedRate = this.speechRate.toLowerCase();
+      if (!normalizedRate || normalizedRate === "100%" || normalizedRate === "normal" || normalizedRate === "medium") {
+        return withPhones;
+      }
+      return `<prosody rate="${this.speechRate}">${withPhones}</prosody>`;
     } catch (error: any) {
       this.logger.error(`Error in formatSayBody: ${error?.message}`, error?.stack);
-      return `<prosody rate="${this.speechRate}">${text || ''}</prosody>`;
+      return this.escapeXml(text || '');
     }
   }
 
   /**
    * Pre-formats raw text into speakable phonetics for Text-to-Speech:
-   * - Strips markdown formatting (*, #, _) and internal [CALL_COMPLETE] tokens.
-   * - Expands medical abbreviations (Dr. -> Doctor / Docteur).
+   * - Strips markdown formatting (*, #, _) and internal control tokens.
+   * - Expands medical/address abbreviations (Dr./Dr -> Doctor / Docteur, Ste. -> Suite, etc.).
+   * - Formats 12-hour times (09:00 AM -> 9 AM, 09:30 AM -> 9:30 AM) so Polly Neural doesn't read leading zeros.
    * - Normalizes patient/appointment IDs for clear letter-by-letter pronunciation.
    */
   public normalizeForTTS(text: string, language?: string): string {
@@ -303,29 +341,43 @@ export class TwilioService {
       if (!text) return "";
 
       let cleaned = text
-        .replace(/\[CALL_COMPLETE\]|\[SLOT_CONFIRMED\]|\[SLOT_CANCELLED\]|\[INTENT_CONFIRM\]|\[INTENT_CANCEL\]|\[INTENT_YES\]|\[INTENT_NO\]/gi, "")
+        .replace(/\[CALL_COMPLETE\]|\[SLOT_CONFIRMED\]|\[SLOT_CANCELLED\]|\[INTENT_CONFIRM\]|\[INTENT_CANCEL\]|\[INTENT_YES\]|\[INTENT_NO\]|\[INTENT_RESCHEDULE\]|\[INTENT_CALL_LATER\]/gi, "")
         .replace(/[*_#`~]/g, "")
         .trim();
 
       if (language === "fr") {
         cleaned = cleaned
-          .replace(/\bDr\./gi, "Docteur")
-          .replace(/\bDre\./gi, "Docteure")
-          .replace(/\bM\./gi, "Monsieur")
-          .replace(/\bMme\./gi, "Madame")
-          .replace(/\bApt\./gi, "Rendez-vous")
+          .replace(/\bDr\.?(?=\s)/gi, "Docteur")
+          .replace(/\bDre\.?(?=\s)/gi, "Docteure")
+          .replace(/\bM\.(?=\s)/gi, "Monsieur")
+          .replace(/\bMme\.?(?=\s)/gi, "Madame")
+          .replace(/\bApt\.?(?=\s)/gi, "Rendez-vous")
+          .replace(/\bTél\.?(?=\s|:)/gi, "Téléphone")
+          .replace(/\b0?(\d{1,2})\s+heures\s+00\b/gi, "$1 heures")
+          .replace(/\b0(\d)\s+heures\s+(\d{2})\b/gi, "$1 heures $2")
           .replace(/\bPAT-(\d+)/gi, "P A T $1")
           .replace(/\bAPT-(\d+)/gi, "A P T $1");
       } else {
         cleaned = cleaned
-          .replace(/\bDr\./gi, "Doctor")
-          .replace(/\bApt\./gi, "Appointment")
-          .replace(/\bSt\./gi, "Street")
+          .replace(/\bDr\.?(?=\s)/gi, "Doctor")
+          .replace(/\bMr\.?(?=\s)/gi, "Mister")
+          .replace(/\bMrs\.?(?=\s)/gi, "Missus")
+          .replace(/\bMs\.?(?=\s)/gi, "Miss")
+          .replace(/\bApt\.?(?=\s)/gi, "Appointment")
+          .replace(/\bSte\.?(?=\s)/gi, "Suite")
+          .replace(/\bDept\.?(?=\s)/gi, "Department")
+          .replace(/\bExt\.?(?=\s|:)/gi, "Extension")
+          .replace(/\bSt\.(?=\s|,|$)/gi, "Street")
+          .replace(/\bAve\.?(?=\s|,|$)/gi, "Avenue")
+          .replace(/\bRd\.?(?=\s|,|$)/gi, "Road")
+          .replace(/\bBlvd\.?(?=\s|,|$)/gi, "Boulevard")
+          .replace(/\b0?(\d{1,2}):00\s*(AM|PM)\b/gi, "$1 $2")
+          .replace(/\b0(\d):(\d{2})\s*(AM|PM)\b/gi, "$1:$2 $3")
           .replace(/\bPAT-(\d+)/gi, "P A T $1")
           .replace(/\bAPT-(\d+)/gi, "A P T $1");
       }
 
-      return cleaned;
+      return cleaned.replace(/\s+/g, " ").trim();
     } catch (error: any) {
       this.logger.error(`Error in normalizeForTTS: ${error?.message}`, error?.stack);
       return text || "";

@@ -5,12 +5,14 @@ export const INTENT_CONFIRM_MARKER = '[INTENT_CONFIRM]';
 export const INTENT_CANCEL_MARKER = '[INTENT_CANCEL]';
 export const INTENT_YES_MARKER = '[INTENT_YES]';
 export const INTENT_NO_MARKER = '[INTENT_NO]';
+export const INTENT_RESCHEDULE_MARKER = '[INTENT_RESCHEDULE]';
+export const INTENT_CALL_LATER_MARKER = '[INTENT_CALL_LATER]';
 
 export const OUT_OF_SCOPE_RESPONSE_EN =
-  'Sorry, I can only provide details regarding your appointment, clinic, physician, and patient information. Would you like to confirm or cancel your appointment?';
+  "I'm sorry, I can only help with details about your appointment, the clinic, or your doctor. Would you like to go ahead and confirm or cancel this appointment?";
 
 export const OUT_OF_SCOPE_RESPONSE_FR =
-  'Désolée, je peux uniquement vous fournir des informations concernant votre rendez-vous, la clinique, le médecin et vos coordonnées de patient. Souhaitez-vous confirmer ou annuler ce rendez-vous?';
+  "Désolée, je peux seulement vous aider avec les détails de votre rendez-vous, de la clinique ou du médecin. Souhaitez-vous confirmer ou annuler ce rendez-vous?";
 
 export interface PromptContext {
   language: string;
@@ -46,7 +48,7 @@ export interface PromptContext {
  * Builds the clinical LLM system prompt in English or French.
  * Enforces:
  * - Strict domain scope: ONLY appointment, clinic, physician, and patient details.
- * - Mandatory 2-step confirmation before finalizing confirm/cancel.
+ * - Mandatory 2-step cross-verification: asks caller to confirm before finalizing booking or cancellation.
  * - Concise, speech-friendly output without abbreviations or markdown.
  */
 export function buildSystemPrompt(context: PromptContext | string, clinicName?: string): string {
@@ -68,10 +70,10 @@ export function buildSystemPrompt(context: PromptContext | string, clinicName?: 
   if (isFrench) {
     const pendingHint =
       ctx.pendingAction === 'CONFIRM'
-        ? `\nÉTAT ACTUEL: Le patient a demandé à CONFIRMER. S'il répond positivement (ex: oui, confirmer), terminez avec ${INTENT_YES_MARKER}. S'il répond non, émettez ${INTENT_NO_MARKER}.`
+        ? `\nÉTAT ACTUEL: Le patient a demandé à CONFIRMER, et nous attendons sa double confirmation. S'il répond positivement (ex: oui, confirmer), terminez avec ${INTENT_YES_MARKER}. S'il répond non, terminez avec ${INTENT_NO_MARKER}. S'il préfère annuler, terminez avec ${INTENT_CANCEL_MARKER}.`
         : ctx.pendingAction === 'CANCEL'
-          ? `\nÉTAT ACTUEL: Le patient a demandé à ANNULER. S'il répond positivement (ex: oui, annuler), terminez avec ${INTENT_YES_MARKER}. S'il répond non, émettez ${INTENT_NO_MARKER}.`
-          : '';
+          ? `\nÉTAT ACTUEL: Le patient a demandé à ANNULER, et nous attendons sa double confirmation. S'il répond positivement (ex: oui, annuler), terminez avec ${INTENT_YES_MARKER}. S'il répond non, terminez avec ${INTENT_NO_MARKER}. S'il préfère confirmer, terminez avec ${INTENT_CONFIRM_MARKER}.`
+          : `\nRÈGLE DE DOUBLE VÉRIFICATION OBLIGATOIRE: Ne confirmez et n'annulez jamais dès la première demande, et ne dites jamais que le rendez-vous est déjà confirmé ou annulé. Si le patient souhaite confirmer ou annuler, posez d'abord une question brève et directe de confirmation ("Êtes-vous sûr de vouloir...") et ajoutez le marqueur approprié.`;
 
     return `Vous êtes une assistante virtuelle de prise de rendez-vous pour ${clinic}, en appel avec ${patientName}.
 
@@ -109,20 +111,23 @@ RÈGLE DE PÉRIMÈTRE STRICT (OBLIGATOIRE):
 - Si l'appelant demande quoi que ce soit hors de ce périmètre (conseil médical, diagnostic, médicaments, actualités, météo, autre fonctionnalité), répondez exactement: "${OUT_OF_SCOPE_RESPONSE_FR}"
 
 RÈGLE LINGUISTIQUE ET VOCALE:
-- Répondez ENTIÈREMENT EN FRANÇAIS, en 1 à 2 phrases courtes et naturelles.
-- N'utilisez jamais d'abréviations ("Docteur", jamais "Dr.") ni de markdown.
+- Parlez comme une réceptionniste chaleureuse, naturelle et polie au téléphone (en français, 1 à 3 phrases courtes).
+- Répondez directement à l'appelant sans commencer vos phrases par des mots de remplissage répétitifs ("D'accord,", "Parfait,", "C'est noté,").
+- Formulez les dates et heures de façon naturelle à l'oral et n'utilisez jamais d'abréviations ("Docteur", jamais "Dr.") ni de markdown.
 ${pendingHint}
 MARQUEURS D'INTENTION (ajoutez à la fin uniquement si applicable):
 - Si le patient souhaite CONFIRMER le rendez-vous${physicianInfo}: terminez par ${INTENT_CONFIRM_MARKER}
-- Si le patient souhaite ANNULER le rendez-vous: terminez par ${INTENT_CANCEL_MARKER}`;
+- Si le patient souhaite ANNULER le rendez-vous: terminez par ${INTENT_CANCEL_MARKER}
+- Si le patient demande à REPORTER à un autre jour ou une autre heure: terminez par ${INTENT_RESCHEDULE_MARKER}
+- Si le patient demande à être RAPPELÉ PLUS TARD (occupé): terminez par ${INTENT_CALL_LATER_MARKER}`;
   }
 
   const pendingHint =
     ctx.pendingAction === 'CONFIRM'
-      ? `\nCURRENT STATE: The caller already asked to CONFIRM. If they confirm/agree (e.g. yes, confirm, sure), append ${INTENT_YES_MARKER}. If they decline/say no, append ${INTENT_NO_MARKER}.`
+      ? `\nCURRENT STATE: The caller already asked to CONFIRM and we are awaiting their double-confirmation. If they confirm/agree (e.g. yes, confirm, sure), append ${INTENT_YES_MARKER}. If they decline/say no, append ${INTENT_NO_MARKER}. If they switch to cancel, append ${INTENT_CANCEL_MARKER}.`
       : ctx.pendingAction === 'CANCEL'
-        ? `\nCURRENT STATE: The caller already asked to CANCEL. If they confirm/agree (e.g. yes, cancel it, sure), append ${INTENT_YES_MARKER}. If they decline/say no, append ${INTENT_NO_MARKER}.`
-        : '';
+        ? `\nCURRENT STATE: The caller already asked to CANCEL and we are awaiting their double-confirmation. If they confirm/agree (e.g. yes, cancel it, sure), append ${INTENT_YES_MARKER}. If they decline/say no, append ${INTENT_NO_MARKER}. If they switch to confirm, append ${INTENT_CONFIRM_MARKER}.`
+        : `\nMANDATORY CROSS-VERIFICATION RULE: Never confirm or cancel immediately on the caller's first request, and never state that it is already confirmed or cancelled. If they ask to confirm or cancel, ask a brief, direct confirmation question ("Are you sure you want to...") and append the corresponding marker.`;
 
   return `You are an AI appointment scheduling assistant for ${clinic}, currently calling ${patientName}.
 
@@ -160,10 +165,13 @@ STRICT SCOPE RULE (MANDATORY):
 - If the caller asks about ANYTHING outside those four areas (medical advice, diagnosis, prescriptions, general knowledge, weather, other features), respond strictly with: "${OUT_OF_SCOPE_RESPONSE_EN}"
 
 LANGUAGE & VOICE RULES:
-- Respond ENTIRELY IN ENGLISH in 1 to 2 short, clear sentences.
-- Never use abbreviations like "Dr." or "St." (always write "Doctor", "Street") and never use markdown.
+- Speak like a warm, friendly clinic receptionist on a real phone call — ENTIRELY IN ENGLISH, in 1 to 3 short, conversational sentences.
+- Use natural contractions ("I'm", "you're", "we've", "that's") and answer the caller directly. NEVER start your reply with filler words like "Got it", "Got it,", "Okay,", or "Sure thing,".
+- Read dates, times, and numbers naturally as a person would say them out loud. Never use abbreviations like "Dr." or "St." (always write "Doctor", "Street") and never use markdown.
 ${pendingHint}
 INTENT MARKERS (append at the end only when applicable):
 - If the caller wants to CONFIRM the appointment${physicianInfo}: append ${INTENT_CONFIRM_MARKER}
-- If the caller wants to CANCEL the appointment: append ${INTENT_CANCEL_MARKER}`;
+- If the caller wants to CANCEL the appointment: append ${INTENT_CANCEL_MARKER}
+- If the caller wants to RESCHEDULE to a different date or time: append ${INTENT_RESCHEDULE_MARKER}
+- If the caller is busy and asks to be CALLED BACK LATER: append ${INTENT_CALL_LATER_MARKER}`;
 }
