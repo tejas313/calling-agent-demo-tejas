@@ -6,6 +6,7 @@ import { AiCallService } from './ai-call.service';
 import { ResponseService } from '../common/response.service';
 import { TwilioService } from '../twilio/twilio.service';
 import { StartCallDto } from './dto/start-call.dto';
+import { StartCallByPhoneDto } from './dto/start-call-by-phone.dto';
 import { TwilioVoiceDto } from './dto/twilio-voice.dto';
 import { TwilioStatusDto } from './dto/twilio-status.dto';
 
@@ -46,6 +47,39 @@ export class AiCallController {
   ) {
     try {
       const result = await this.aiCallService.startCall(dto);
+      return this.responseService.success(res, 'CALL_INITIATED_SUCCESSFULLY', result);
+    } catch (error: any) {
+      const statusCode = error?.status || (error?.getStatus ? error.getStatus() : 500);
+      return this.responseService.error(req, res, error?.message || 'FAILED_TO_START_CALL', statusCode);
+    }
+  }
+
+  @Post('start-by-phone')
+  @HttpCode(200)
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
+  @ApiOperation({
+    summary: 'Start an AI outbound call by phone number',
+    description:
+      'Looks up the patient and triage assignment from the provided phone number and initiates an outbound AI call via startCall',
+  })
+  @ApiBody({ type: StartCallByPhoneDto })
+  @ApiResponse({
+    status: 200,
+    description: 'Call initiated successfully',
+    schema: {
+      example: { success: true, callId: 'uuid', twilioCallSid: 'CAxxxxx', status: 'initiated' },
+    },
+  })
+  @ApiResponse({ status: 400, description: 'Invalid request' })
+  @ApiResponse({ status: 404, description: 'Patient or triage assignment not found' })
+  @ApiResponse({ status: 429, description: 'Rate limit exceeded' })
+  async startCallByPhone(
+    @Body() dto: StartCallByPhoneDto,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    try {
+      const result = await this.aiCallService.startCallByPhone(dto);
       return this.responseService.success(res, 'CALL_INITIATED_SUCCESSFULLY', result);
     } catch (error: any) {
       const statusCode = error?.status || (error?.getStatus ? error.getStatus() : 500);

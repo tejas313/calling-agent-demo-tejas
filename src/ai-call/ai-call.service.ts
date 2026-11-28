@@ -25,10 +25,11 @@ import {
   TriageAssignment,
 } from '../common';
 import { StartCallDto } from './dto/start-call.dto';
+import { StartCallByPhoneDto } from './dto/start-call-by-phone.dto';
 import { TwilioService } from '../twilio/twilio.service';
 import { AgentService } from '../langchain/agent/agent.service';
 import { LangsmithService } from '../langsmith/langsmith.service';
-import { CallStatus, CallOutcome, MAX_CALL_TURNS, MAX_NO_INPUT_RETRIES } from '../common/constants';
+import { CallStatus, CallOutcome, CallType, MAX_CALL_TURNS, MAX_NO_INPUT_RETRIES } from '../common/constants';
 
 @Injectable()
 export class AiCallService {
@@ -396,6 +397,94 @@ export class AiCallService {
       return parseInt(h24Match[1], 10) * 60 + parseInt(h24Match[2], 10);
     }
     return Number.MAX_SAFE_INTEGER;
+  }
+
+  /**
+   * Resolves patient and triage_assignments details from a phone number
+   * and delegates to startCall(dto) without altering existing startCall behavior.
+   */
+  async startCallByPhone(dto: StartCallByPhoneDto): Promise<ReturnType<AiCallService['startCall']>> {
+    if (!isValidPhoneNumber(dto.phoneNumber)) {
+      const reason = `Invalid phone number format "${dto.phoneNumber}". Please provide a valid international number in E.164 format (e.g. +14165551234).`;
+      this.logger.warn(reason);
+      await this.logCallEvent({
+        eventType: 'CALL_BLOCKED',
+        level: 'WARN',
+        message: reason,
+        details: { phoneNumber: dto.phoneNumber },
+      });
+      throw new BadRequestException(reason);
+    }
+
+    const parsedNumber = parsePhoneNumber(dto.phoneNumber);
+    const normalizedPhone = parsedNumber.format('E.164');
+    const digitsOnly = normalizedPhone.replace(/\D/g, '');
+
+    const rows = await this.rawQuery<{
+      patientId: string;
+      clinicId: string | null;
+      assignmentsId: string;
+      assignedPhysicianId: string | null;
+      appointmentTypeId: string | null;
+    }[]>(
+      `SELECT
+        p.id AS "patientId",
+        COALESCE(ta.clinic_id, p.clinic_id) AS "clinicId",
+        ta.id AS "assignmentsId",
+        ta.assigned_physician_id AS "assignedPhysicianId",
+        ta.appointment_type_id AS "appointmentTypeId"
+      FROM patient_profiles p
+      INNER JOIN triage_assignments ta ON ta.patient_id = p.id
+      WHERE (
+        p.phone = $1
+        OR regexp_replace(COALESCE(p.phone, ''), '[^0-9+]', '', 'g') = $1
+        OR regexp_replace(COALESCE(p.phone, ''), '[^0-9]', '', 'g') = $2
+      )
+      AND ta."scheduleType" = 1
+      AND ta."approvedDate" IS NOT NULL
+      ORDER BY ta."updatedAt" DESC NULLS LAST, ta."createdAt" DESC NULLS LAST
+      LIMIT 1`,
+      [normalizedPhone, digitsOnly],
+    );
+
+    const match = rows && rows.length > 0 ? rows[0] : null;
+    if (!match) {
+      const msg = `No patient with an eligible triage assignment (scheduleType = 1 and approvedDate is not null) found for phone number ${normalizedPhone}`;
+      await this.logCallEvent({
+        eventType: 'CALL_BLOCKED',
+        level: 'WARN',
+        message: msg,
+        details: { phoneNumber: normalizedPhone },
+      });
+      throw new NotFoundException(msg);
+    }
+
+    if (!match.clinicId) {
+      const msg = `Clinic ID not found for patient ${match.patientId} / assignment ${match.assignmentsId}`;
+      await this.logCallEvent({
+        patientId: match.patientId,
+        assignmentsId: match.assignmentsId,
+        eventType: 'CALL_BLOCKED',
+        level: 'WARN',
+        message: msg,
+        details: { phoneNumber: normalizedPhone },
+      });
+      throw new BadRequestException(msg);
+    }
+
+    const startDto: StartCallDto = {
+      phoneNumber: normalizedPhone,
+      patientId: match.patientId,
+      clinicId: match.clinicId,
+      assignmentsId: match.assignmentsId,
+      assigned_physician_id: match.assignedPhysicianId ?? undefined,
+      appointment_type_id: match.appointmentTypeId ?? undefined,
+      language: dto.language ?? 'en',
+      callType: dto.callType ?? CallType.APPOINTMENT_CONFIRMATION,
+      testMode: dto.testMode ?? false,
+    };
+
+    return this.startCall(startDto);
   }
 
   /**
